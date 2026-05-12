@@ -1,3 +1,5 @@
+run_date: "2026-05-12"
+
 spark:
   master: "spark://10.84.18.85:7077"
   app_name: "SemanticFlow"
@@ -27,4 +29,4 @@ minio:
   endpoint: "http://10.84.18.85:9000"
   access_key: "admin"
   secret_key: "admin12345"
-  bucket: "semanticflow"
+  bucket: "semantic-raw"
