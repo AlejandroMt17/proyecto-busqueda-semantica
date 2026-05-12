@@ -8,7 +8,9 @@ Salida por defecto (convención del PDF del curso):
 
 Opcionalmente se puede duplicar la misma tabla en MinIO con `--output-s3a s3a://.../run_date=.../`.
 
-## Columnas (tabla de features)
+## Columnas (tabla de featuress) 
+## toris
+
 
 | Columna | Tipo (CSV) | Descripción |
 |---------|------------|-------------|
@@ -19,7 +21,7 @@ Opcionalmente se puede duplicar la misma tabla en MinIO con `--output-s3a s3a://
 | `raw_text` | string | Texto del **chunk** ya limpio (NFKC, espacios, boilerplate simple removido). Equivale al cuerpo que consumirá la Fase 2. |
 | `ingestion_date` | string (`YYYY-MM-DD`) | Fecha de ingesta al pipeline; por defecto `--ingestion-date` o `--run-date`. |
 
-## Entradas soportadas
+## Entradas soportadas :
 
 1. **JSONL(.gz)** vía `--input-json-glob` (Spark `read.json`): campos mínimos `id`, `title`, `text`; opcionales `source_uri`, `source_updated` (para `--since-date`).
 2. **Archivos** vía `--input-files-glob` y `binaryFile`: `.pdf`, `.docx`, `.html`/`.htm`, `.txt`/`.md` (y otros con Tika si está activo).
