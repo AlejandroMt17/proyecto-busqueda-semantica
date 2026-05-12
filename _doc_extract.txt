@@ -1,0 +1,875 @@
+Sistema de Búsqueda Semántica
+Plan de Implementación · 4 Semanas · Apache Spark + Elasticsearch
+ 
+Curso
+Big Data · Ciencia de Datos
+Proyecto 1 · NLP
+Equipo
+3 personas · 1 Master + 2 Workers
+4 semanas
+Tecnología Core
+Apache Spark 3.5 · Sentence-Transformers · Elasticsearch 8.x
+500K+ docs
+
+1. Resumen Ejecutivo y Objetivo
+ 
+El presente documento define el plan técnico completo para construir un Sistema de Búsqueda Semántica en Batch usando Apache Spark. A diferencia de la búsqueda por palabras clave, este sistema transforma cada fragmento de texto en un vector denso de 384 dimensiones y permite encontrar documentos por significado semántico.
+ 
+Una consulta como "problemas de motor" puede encontrar documentos sobre "falla de combustión" aunque no compartan ninguna palabra. Esto se logra mediante el modelo sentence-transformers/all-MiniLM-L6-v2 aplicado de manera distribuida sobre un corpus de 500,000+ documentos.
+ 
+Objetivo Principal
+Procesar 500,000+ documentos (Wikipedia ES / arXiv) de forma distribuida con Apache Spark.
+Generar embeddings densos de 384 dimensiones usando Pandas UDFs en Spark.
+Indexar los vectores en Elasticsearch con campo dense_vector y similitud coseno.
+Demostrar distribución real de carga entre 3 laptops (1 Master + 2 Workers).
+ 
+Lo que se evalúa vs lo que NO se evalúa
+✔ SÍ se evalúa
+✘ NO se evalúa
+ETL funcional y reproducible
+Inferencia distribuida real (Pandas UDF)
+Persistencia idempotente en Elasticsearch
+Cluster Spark operativo (Spark UI)
+Documentación técnica y README
+Calidad del modelo (accuracy)
+Fine-tuning del embedding
+UI/UX de búsqueda avanzada
+ 
+Penalizaciones críticas a evitar
+Falta
+Penalización
+¿Cuándo ocurre?
+Inferencia con .toPandas() previo (no distribuida)
+-30%
+Semana 3
+Cluster pregrabado / simulado en una sola laptop
+-25%
+Semana 1-4
+Sin idempotencia en Elasticsearch (duplicados)
+-15%
+Semana 4
+Volumen de datos por debajo de 500K documentos
+-15%
+Semana 1-2
+Entrega semanal incompleta o no presentada
+-10% c/u
+Cada semana
+
+2. Stack Tecnológico y Arquitectura
+ 
+2.1 Stack Tecnológico Completo
+ 
+Capa
+Tecnología
+Versión / Detalle
+Procesamiento
+Apache Spark
+3.5.1 · PySpark · Standalone Cluster
+NLP/Embeddings
+sentence-transformers
+all-MiniLM-L6-v2 · 384 dims · ~80MB
+Búsqueda vectorial
+Elasticsearch
+8.13.0 · campo dense_vector · coseno
+Extracción PDF
+Apache Tika / tika-python
+2.9.x · vía REST server
+Extracción HTML
+BeautifulSoup4
+4.x · lxml parser
+Almacenamiento objetos
+MinIO
+Compatible S3 · acceso distribuido
+Runtime
+Python
+3.10+ · pip
+Infraestructura Java
+OpenJDK
+17 · mismo en todos los nodos
+Contenedores
+Docker
+Elasticsearch + MinIO en Docker
+Orquestación
+Bash script
+run_pipeline.sh · una sola invocación
+ 
+2.2 Diagrama de Arquitectura — Flujo de 3 Fases
+ 
+La arquitectura sigue el patrón ETL → Inferencia → Persistencia, ejecutado cada domingo. Las tres fases se encadenan de forma secuencial y cada una produce artefactos intermedios particionados por fecha.
+ 
+FASE 1
+ETL NLP
+PDF/HTML → chunks
+Tika + BeautifulSoup
+→ CSV chunks
+→
+FASE 2
+INFERENCIA
+Pandas UDFs dist.
+all-MiniLM-L6-v2
+→ CSV embeddings
+→
+FASE 3
+PERSISTENCIA
+Elasticsearch 8.x
+dense_vector + coseno
+→ kNN queries
+→
+BÚSQUEDA
+SEMÁNTICA
+kNN REST API
+Dom 02:00 · Semana 2
+
+Dom 03:00 · Semana 3
+
+Dom 04:00 · Semana 4
+
+
+
+3. Estructura de Carpetas del Proyecto
+ 
+La siguiente estructura sigue las convenciones obligatorias del proyecto integrador, adaptadas al dominio NLP/Search. Cada directorio tiene una responsabilidad única y claramente definida.
+ 
+Repositorio: busqueda_semantica_spark/
+busqueda_semantica_spark/
+├── README.md                    # Guía completa para levantar el proyecto desde cero
+├── docker-compose.yml           # Elasticsearch + MinIO en contenedores
+├── conf/
+│   ├── spark-defaults.conf      # Configuración del cluster Spark
+│   ├── elastic_mapping.json     # Definición del índice dense_vector
+│   └── config.yaml              # Rutas, fechas, conexiones (sin hardcodear)
+├── data/
+│   ├── raw/                     # Archivos PDF/HTML/JSON crudos (500K+)
+│   ├── chunks/                  # Salida Fase 1: CSVs segmentados
+│   │   └── run_date=YYYY-MM-DD/ # Particionado por fecha de ejecución
+│   └── embeddings/              # Salida Fase 2: IDs + vectores densos
+│       └── run_date=YYYY-MM-DD/
+├── src/
+│   ├── etl_nlp.py               # FASE 1: Tika, BeautifulSoup, chunking
+│   ├── spark_vectorizer.py      # FASE 2: Inferencia distribuida con Pandas UDF
+│   └── indexer_elastic.py       # FASE 3: Carga masiva a Elasticsearch
+├── scripts/
+│   ├── generate_data.py         # Descarga/amplificación dataset (reproducible)
+│   ├── setup_elastic.sh         # Levanta Elasticsearch en Docker
+│   ├── start_master.sh          # Inicia nodo master
+│   ├── start_worker.sh          # Inicia nodo worker (recibe IP master)
+│   └── run_pipeline.sh          # Orquesta las 3 fases (run_date como arg)
+├── models/                      # No necesario (modelo pre-entrenado, se descarga)
+├── notebooks/
+│   ├── exploracion_datos.ipynb  # EDA del corpus
+│   └── prueba_busqueda.ipynb    # Prueba de consultas kNN
+├── tests/
+│   ├── test_etl.py              # Test de Fase 1 sobre muestra pequeña
+│   ├── test_vectorizer.py       # Test de Fase 2 sobre muestra pequeña
+│   └── test_indexer.py          # Test de Fase 3: idempotencia
+└── docs/
+    ├── arquitectura.md          # Documento técnico de arquitectura
+    └── decisiones.md            # ADR (Architecture Decision Records)
+ 
+Descripción de Archivos Clave
+Archivo
+Responsabilidad
+src/etl_nlp.py
+Lectura distribuida de PDFs/HTML con Tika y BeautifulSoup. Limpieza Unicode, deduplicación, segmentación en chunks de 256 tokens con overlap de 32 tokens.
+src/spark_vectorizer.py
+Carga los CSVs de chunks. Aplica Pandas UDF distribuida que invoca SentenceTransformer en cada executor. Guarda chunk_id + vector.
+src/indexer_elastic.py
+Lee los CSVs de embeddings y los indexa en Elasticsearch usando el conector elasticsearch-spark. Usa es.mapping.id para garantizar idempotencia.
+conf/elastic_mapping.json
+Define el índice 'documents' con campo dense_vector de 384 dims, similitud coseno, indexado HNSW.
+scripts/generate_data.py
+Descarga arXiv abstracts de Kaggle y/o subconjunto de Wikipedia. Con semilla fija para reproducibilidad. Genera 500K+ documentos.
+scripts/run_pipeline.sh
+Orquestador: recibe run_date como parámetro, ejecuta las 3 fases en secuencia con spark-submit.
+conf/config.yaml
+Centraliza todos los parámetros: IPs, puertos, rutas, modelo, tamaño de chunk. Ningún valor hardcodeado en el código.
+
+4. Plan de Tareas — Implementación Completa
+ 
+Cada semana incluye: objetivos técnicos, entregables de código y documentación, guía paso a paso, y criterios de aceptación. El peso de cada semana en la nota final se indica en el banner de cabecera.
+ 
+SEMANA 01
+Diseño · Cluster · Datos · Infraestructura Base
+15%
+ 
+Objetivos de la Semana
+Conformar el equipo y asignar roles: Líder Técnico, Responsable de Cluster, Responsable de Datos/NLP.
+Diseñar la arquitectura específica del sistema de búsqueda semántica.
+Levantar el cluster Spark standalone con las 3 laptops del equipo.
+Generar o descargar el dataset de 500K+ documentos de texto.
+Configurar Elasticsearch y MinIO en Docker.
+Establecer el repositorio Git con la estructura estándar.
+ 
+FASE 0: Configuración Inicial del Entorno
+ 
+Paso 1 — Instalar dependencias en TODOS los nodos
+Ejecutar en cada laptop del equipo (Ubuntu 22.04+ recomendado):
+sudo apt update && sudo apt install -y openjdk-17-jdk
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+cd /opt && sudo wget https://dlcdn.apache.org/spark/spark-3.5.1/spark-3.5.1-bin-hadoop3.tgz
+sudo tar -xzf spark-3.5.1-bin-hadoop3.tgz && sudo mv spark-3.5.1-bin-hadoop3 spark
+pip install pyspark==3.5.1 sentence-transformers tika beautifulsoup4 elasticsearch pandas numpy pyyaml
+ 
+Paso 2 — Configurar variables de entorno (.bashrc / .zshrc)
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export SPARK_HOME=/opt/spark
+export PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin
+export PYSPARK_PYTHON=python3
+source ~/.bashrc
+ 
+Paso 3 — Verificar conectividad de red
+Identificar las IPs locales. Ejemplo de topología recomendada:
+Rol
+IP Ejemplo
+Puertos
+Servicios adicionales
+Master + Worker
+192.168.1.100
+7077, 8080, 4040
+Elasticsearch :9200, MinIO :9000
+Worker 1
+192.168.1.101
+8081, 7337
+—
+Worker 2
+192.168.1.102
+8081, 7337
+—
+ 
+Paso 4 — Levantar el cluster Spark
+En el nodo Master:
+export SPARK_MASTER_HOST=192.168.1.100
+$SPARK_HOME/sbin/start-master.sh
+# Verificar: http://192.168.1.100:8080
+ 
+En cada Worker:
+$SPARK_HOME/sbin/start-worker.sh spark://192.168.1.100:7077 --cores 4 --memory 6g
+ 
+Paso 5 — Job de prueba de distribución
+spark-submit --master spark://192.168.1.100:7077 --deploy-mode client \
+  --executor-memory 4g --total-executor-cores 6 \
+  /opt/spark/examples/src/main/python/pi.py 100
+Verificar en http://192.168.1.100:4040 que las tasks se distribuyen entre los workers. Si no hay distribución, NO continuar hasta resolverlo.
+ 
+Paso 6 — Levantar Elasticsearch y MinIO con Docker
+# setup_elastic.sh — ejecutar en el nodo Master
+docker run -d --name elasticsearch \
+  -p 9200:9200 -p 9300:9300 \
+  -e 'discovery.type=single-node' \
+  -e 'xpack.security.enabled=false' \
+  -e 'ES_JAVA_OPTS=-Xms2g -Xmx2g' \
+  docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+ 
+# MinIO para almacenamiento compartido
+docker run -d --name minio -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=admin12345 \
+  -v /data/minio:/data minio/minio server /data --console-address ':9001'
+ 
+Paso 7 — Crear índice Elasticsearch (elastic_mapping.json)
+curl -X PUT 'http://localhost:9200/documents' \
+  -H 'Content-Type: application/json' -d '{
+  "mappings": { "properties": {
+    "chunk_id":  { "type": "keyword" },
+    "doc_id":    { "type": "keyword" },
+    "title":     { "type": "text"    },
+    "text":      { "type": "text"    },
+    "source_uri":{ "type": "keyword" },
+    "ingestion_date": { "type": "date" },
+    "embedding": { "type": "dense_vector", "dims": 384,
+                   "index": true, "similarity": "cosine" }
+  }}}'
+ 
+Paso 8 — Generar/descargar el dataset (scripts/generate_data.py)
+Opciones recomendadas para alcanzar 500K+ documentos:
+arXiv abstracts (Kaggle): ~2M de abstracts científicos. Descargar desde kaggle datasets download Cornell-University/arxiv. Tomar un subconjunto de 500K.
+Wikipedia ES dump: Descargar de dumps.wikimedia.org/eswiki y extraer con WikiExtractor. Muy recomendable por diversidad temática.
+Combinación: 250K arXiv + 250K Wikipedia ES = 500K documentos con variedad de estilos.
+ 
+El script generate_data.py debe fijar una semilla (seed=42) para que dos ejecuciones produzcan exactamente el mismo corpus. Debe documentar: fuente, transformaciones aplicadas y volumen final.
+ 
+Entregables de la Semana 1
+#
+Entregable
+Tipo
+Responsable
+1
+Documento de diseño técnico (4-6 páginas): problema, arquitectura, diagrama, decisiones técnicas justificadas, plan de semanas 2-4
+Documentación
+Líder Técnico
+2
+Cluster Spark funcional: captura Spark UI con 3 nodos activos + job de prueba distribuido ejecutándose
+Código / Demo
+Resp. Cluster
+3
+Elasticsearch levantado con índice 'documents' creado (dense_vector, 384 dims, coseno)
+Código
+Resp. Cluster
+4
+MinIO levantado con bucket creado y dataset subido
+Código / Datos
+Resp. Datos
+5
+Dataset de 500K+ documentos generado con script reproducible (seed fija)
+Código / Datos
+Resp. Datos
+6
+Repositorio Git: estructura estándar, README inicial, al menos 1 commit por integrante
+Documentación
+Todo el equipo
+7
+conf/elastic_mapping.json con definición del índice dense_vector
+Código/Conf
+Resp. Cluster
+8
+scripts/setup_elastic.sh y scripts/start_master.sh / start_worker.sh funcionales
+Código
+Resp. Cluster
+9
+conf/config.yaml con todos los parámetros externalizados (IPs, rutas, modelo)
+Código/Conf
+Líder Técnico
+
+SEMANA 02
+Fase 1 · ETL NLP · Limpieza, Extracción y Chunking
+20%
+ 
+Objetivos de la Semana
+Implementar src/etl_nlp.py: lectura distribuida, extracción de texto, limpieza y segmentación en chunks.
+Procesar el corpus completo de 500K+ documentos sobre el cluster.
+Producir los CSVs de chunks particionados por run_date.
+Validar calidad del output: esquema, rangos, no nulos.
+Escribir test_etl.py con prueba sobre muestra reducida.
+ 
+FASE 1: Implementación ETL NLP — Guía Paso a Paso
+ 
+Paso 1 — Configurar Apache Tika para extracción de PDFs
+Apache Tika se levanta como servidor REST para extracción robusta de PDFs. Los workers acceden a él a través de la red del cluster.
+# En el nodo master — levantar servidor Tika
+wget https://dlcdn.apache.org/tika/2.9.2/tika-server-standard-2.9.2.jar
+java -jar tika-server-standard-2.9.2.jar --host 0.0.0.0 --port 9998 &
+# En Python: pip install tika
+import tika; tika.initVM()
+from tika import parser
+parsed = parser.from_file('doc.pdf', 'http://192.168.1.100:9998/tika')
+text = parsed['content']
+ 
+Paso 2 — Implementar la función de extracción de texto
+La función debe manejar los tres tipos de archivo: PDF (Tika), HTML (BeautifulSoup) y TXT (lectura directa). Se llamará desde la Pandas UDF de extracción.
+def extract_text(file_path: str, file_type: str) -> str:
+    if file_type == 'pdf':
+        from tika import parser
+        result = parser.from_file(file_path, 'http://192.168.1.100:9998/tika')
+        return result.get('content', '') or ''
+    elif file_type == 'html':
+        from bs4 import BeautifulSoup
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            return BeautifulSoup(f.read(), 'lxml').get_text(separator=' ')
+    else:  # txt, json
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+ 
+Paso 3 — Implementar la función de limpieza de texto
+La limpieza remueve artefactos comunes en datos de Wikipedia y arXiv: ecuaciones LaTeX residuales, encabezados repetitivos, caracteres de control, etc.
+import re, unicodedata
+def clean_text(text: str) -> str:
+    if not text: return ''
+    text = unicodedata.normalize('NFKC', text)
+    text = re.sub(r'\s+', ' ', text).strip()       # normalizar espacios
+    text = re.sub(r'\[\d+\]', '', text)           # remover citas [1]
+    text = re.sub(r'https?://\S+', '', text)       # remover URLs
+    text = re.sub(r'[\x00-\x1F\x7F]', '', text)  # control chars
+    return text
+ 
+Paso 4 — Implementar el chunking de 256 tokens
+Los modelos de sentence-transformers tienen un límite de tokens. Se segmenta cada documento en chunks de 256 tokens con overlap de 32 para preservar contexto en los bordes.
+from transformers import AutoTokenizer
+tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+def chunk_text(text: str, chunk_size=256, overlap=32) -> list:
+    tokens = tokenizer.encode(text, add_special_tokens=False)
+    chunks = []
+    step = chunk_size - overlap
+    for i in range(0, max(1, len(tokens)), step):
+        chunk_tokens = tokens[i:i + chunk_size]
+        chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
+        if len(chunk_text.strip()) > 30:  # filtrar chunks triviales
+            chunks.append(chunk_text)
+        if i + chunk_size >= len(tokens): break
+    return chunks
+ 
+Paso 5 — Implementar el ETL principal distribuido con Spark
+Este es el corazón del src/etl_nlp.py. Usa Pandas UDFs para que la extracción, limpieza y chunking ocurran en los workers del cluster, no en el driver.
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import pandas_udf, explode, col, lit
+from pyspark.sql.types import ArrayType, StringType, StructType, StructField
+ 
+@pandas_udf(ArrayType(StructType([
+    StructField('chunk_id', StringType()),
+    StructField('raw_text', StringType())])))
+def process_document(paths: pd.Series, types: pd.Series) -> pd.Series:
+    results = []
+    for path, ftype in zip(paths, types):
+        doc_id = hashlib.md5(path.encode()).hexdigest()
+        raw = extract_text(path, ftype)
+        clean = clean_text(raw)
+        chunks = chunk_text(clean)
+        results.append([
+            {'chunk_id': f'{doc_id}_{i}', 'raw_text': c}
+            for i, c in enumerate(chunks)])
+    return pd.Series(results)
+ 
+Paso 6 — Esquema de salida CSV (data/chunks/)
+Cada fila del CSV de salida representa un chunk individual. El esquema de columnas es:
+Columna
+Tipo
+Descripción
+chunk_id
+STRING
+MD5(doc_path) + '_' + chunk_index. Clave única.
+doc_id
+STRING
+MD5 del path del documento fuente.
+title
+STRING
+Título extraído del documento (o filename).
+source_uri
+STRING
+Ruta original del archivo en MinIO/NFS.
+raw_text
+STRING
+Texto limpio del chunk (max ~256 tokens).
+ingestion_date
+DATE
+Fecha de ejecución del pipeline (run_date).
+ 
+Paso 7 — Lanzar Fase 1 en el cluster
+spark-submit \
+  --master spark://192.168.1.100:7077 \
+  --deploy-mode client \
+  --executor-memory 4g \
+  --total-executor-cores 6 \
+  --conf spark.sql.shuffle.partitions=60 \
+  src/etl_nlp.py --run-date 2026-05-10
+ 
+Entregables de la Semana 2
+Código src/etl_nlp.py: parametrizable (--run-date, --input-path), con logging INFO/ERROR.
+CSVs de chunks generados en data/chunks/run_date=YYYY-MM-DD/ sobre el corpus completo.
+Reporte de ejecución: tiempo total, # docs leídos, # chunks generados, captura Spark UI.
+Documentación del esquema de salida (columnas, tipos, ejemplos de valores).
+tests/test_etl.py: test con 100 documentos de muestra (no nulos, rangos, conteo mínimo).
+Avance del documento técnico: sección de diseño ETL actualizada con decisiones de chunking.
+
+SEMANA 03
+Fase 2 · Inferencia Distribuida · Pandas UDFs + Embeddings
+25%
+ 
+Objetivos de la Semana
+Implementar src/spark_vectorizer.py con Pandas UDF distribuida para generar embeddings.
+Garantizar que el modelo se carga UNA VEZ por executor (no por batch).
+Demostrar distribución real en Spark UI: tasks en múltiples workers.
+Medir y comparar tiempo single-node vs cluster.
+Producir CSVs de embeddings en data/embeddings/run_date=YYYY-MM-DD/.
+ 
+FASE 2: Inferencia Distribuida — Guía Paso a Paso
+ 
+Paso 1 — Entender la restricción crítica de la Pandas UDF
+⚠ PUNTO CRÍTICO DE EVALUACIÓN (-30% si se viola)
+CORRECTO:  Aplicar el modelo dentro de la Pandas UDF → corre en workers (distribuido).
+INCORRECTO: df.toPandas() → model.encode() en el driver → NO distribuido (penalización -30%).
+
+La Pandas UDF se ejecuta en particiones del DataFrame, cada partición en un executor distinto.
+El modelo debe cargarse una sola vez por executor usando el truco del atributo de función.
+Spark NO puede serializar el modelo SentenceTransformer para enviarlo vía broadcast.
+Solución: carga lazy dentro de la UDF con hasattr(embed, '_model')
+ 
+Paso 2 — Implementar la Pandas UDF de embeddings
+El patrón estándar para inferencia distribuida con modelos Python externos en Spark:
+from pyspark.sql.functions import pandas_udf
+from pyspark.sql.types import ArrayType, FloatType
+import pandas as pd
+ 
+@pandas_udf(ArrayType(FloatType()))
+def embed(texts: pd.Series) -> pd.Series:
+    # Carga lazy del modelo — UNA VEZ por executor, no por batch
+    if not hasattr(embed, '_model'):
+        from sentence_transformers import SentenceTransformer
+        embed._model = SentenceTransformer('all-MiniLM-L6-v2')
+    # Encode en batch — aprovecha vectorización PyTorch
+    vectors = embed._model.encode(
+        texts.fillna('').tolist(),
+        batch_size=32,
+        show_progress_bar=False,
+        normalize_embeddings=True  # para similitud coseno
+    )
+    return pd.Series([v.tolist() for v in vectors])
+ 
+Paso 3 — Pipeline completo de inferencia
+# src/spark_vectorizer.py
+spark = SparkSession.builder \
+    .appName('SemanticSearch_Vectorizer') \
+    .config('spark.sql.shuffle.partitions', '60') \
+    .getOrCreate()
+ 
+# Leer chunks de Fase 1
+df = spark.read.csv(
+    f's3a://data/chunks/run_date={run_date}/*.csv',
+    header=True, inferSchema=True
+)
+ 
+# Repartir para distribuir carga uniformemente entre workers
+df = df.repartition(60)
+ 
+# Aplicar embedding distribuido
+predictions = df.withColumn('embedding', embed(df['raw_text']))
+ 
+# Salida: solo id + embedding
+predictions.select('chunk_id', 'doc_id', 'embedding') \
+    .write.mode('overwrite') \
+    .parquet(f's3a://data/embeddings/run_date={run_date}/')
+ 
+Paso 4 — Verificar distribución en Spark UI
+Durante la ejecución, abrir http://192.168.1.100:4040 y verificar:
+Stages: El stage de aplicación de la UDF debe mostrar tasks distribuidas entre todos los executors.
+Executors: Pestaña 'Executors' → todos los workers deben aparecer con tareas completadas.
+Tasks: El número de tasks activas debe superar al número de executors (hay backpressure real).
+GanttChart: En el stage detail, las tareas deben estar distribuidas, no todas en un solo executor.
+ 
+Tomar capturas de pantalla de la Spark UI para incluirlas en el reporte de la semana 3.
+ 
+Paso 5 — Comparativa single-node vs cluster
+Ejecutar sobre un subset de 10K documentos primero en modo local, luego en cluster, y registrar los tiempos:
+# Modo local (single-node) — ejecutar en una sola laptop
+spark-submit --master local[4] src/spark_vectorizer.py \
+    --run-date 2026-05-10 --sample 10000
+ 
+# Modo cluster distribuido
+spark-submit --master spark://192.168.1.100:7077 \
+    --total-executor-cores 6 --executor-memory 4g \
+    src/spark_vectorizer.py --run-date 2026-05-10 --sample 10000
+ 
+Paso 6 — Formato de salida de embeddings
+Los vectores se guardan como array de 384 floats. En CSV se serializa como string JSON; en Parquet como array nativo (recomendado para Fase 3).
+# CSV: embedding se guarda como '[0.123, -0.456, ...]'
+# Parquet: embedding se guarda como ArrayType(FloatType()) nativo
+# Recomendación: usar Parquet para Fase 3 (más eficiente)
+ 
+Entregables de la Semana 3
+Código src/spark_vectorizer.py: parametrizable, con logging, Pandas UDF correctamente implementada.
+Análisis de distribución: capturas Spark UI mostrando tasks en múltiples workers.
+Tabla comparativa: tiempo single-node vs cluster para 10K documentos.
+CSVs/Parquet de embeddings en data/embeddings/run_date=YYYY-MM-DD/.
+tests/test_vectorizer.py: test sobre 50 chunks (dimensión=384, no NaN, norma unitaria).
+Avance documento técnico: sección de inferencia con justificación del modelo elegido.
+Modelo documentado: all-MiniLM-L6-v2, 384 dims, multilenguaje, velocidad en CPU.
+
+SEMANA 04
+Fase 3 · Persistencia + Integración + Demo Final
+40%
+ 
+Objetivos de la Semana
+Implementar src/indexer_elastic.py: carga masiva a Elasticsearch con idempotencia garantizada.
+Verificar que re-ejecutar para la misma fecha NO duplica documentos (es.mapping.id).
+Integrar las 3 fases en scripts/run_pipeline.sh (una sola invocación end-to-end).
+Preparar y ensayar la presentación final con demo en vivo.
+Finalizar toda la documentación técnica y README.
+ 
+FASE 3: Persistencia en Elasticsearch — Guía Paso a Paso
+ 
+Paso 1 — Configurar el conector elasticsearch-spark
+Spark puede escribir directamente a Elasticsearch usando el conector oficial. Debe descargarse el JAR correspondiente a la versión de Spark y Elasticsearch.
+# Descargar el conector (ejecutar antes de spark-submit)
+wget https://repo1.maven.org/maven2/org/elasticsearch/elasticsearch-spark-30_2.12/8.13.0/elasticsearch-spark-30_2.12-8.13.0.jar
+# En spark-submit, pasar el JAR:
+--jars /opt/spark/jars/elasticsearch-spark-30_2.12-8.13.0.jar
+ 
+Paso 2 — Implementar la carga masiva idempotente
+La clave de la idempotencia es usar es.mapping.id apuntando a chunk_id. Si el documento ya existe con ese ID, Elasticsearch lo actualiza en lugar de duplicarlo.
+# src/indexer_elastic.py
+spark.conf.set('es.nodes', '192.168.1.100')
+spark.conf.set('es.port', '9200')
+spark.conf.set('es.nodes.wan.only', 'true')
+ 
+# Leer embeddings de Fase 2 + texto de Fase 1 (join por chunk_id)
+embeddings = spark.read.parquet(f's3a://data/embeddings/run_date={run_date}/')
+chunks = spark.read.csv(f's3a://data/chunks/run_date={run_date}/', header=True)
+docs = chunks.join(embeddings, 'chunk_id').select(
+    'chunk_id', 'doc_id', 'title', 'raw_text', 'source_uri', 'ingestion_date', 'embedding'
+)
+ 
+# Escritura idempotente: es.mapping.id garantiza upsert por chunk_id
+docs.write \
+    .format('org.elasticsearch.spark.sql') \
+    .option('es.resource', 'documents') \
+    .option('es.mapping.id', 'chunk_id') \
+    .option('es.write.operation', 'upsert') \
+    .mode('append') \
+    .save()
+ 
+Paso 3 — Verificación post-escritura
+# Contar documentos en el índice
+curl -X GET 'http://localhost:9200/documents/_count'
+# Verificar que un chunk_id específico existe
+curl -X GET 'http://localhost:9200/documents/_doc/{chunk_id}'
+# Verificar idempotencia: relanzar y confirmar que el conteo NO cambia
+ 
+Paso 4 — Script de prueba de búsqueda semántica
+Para la demo final, preparar un script Python que convierta una consulta en texto a un vector y ejecute una búsqueda kNN contra Elasticsearch.
+from sentence_transformers import SentenceTransformer
+from elasticsearch import Elasticsearch
+
+model = SentenceTransformer('all-MiniLM-L6-v2')
+es = Elasticsearch('http://192.168.1.100:9200')
+
+def semantic_search(query: str, k: int = 10):
+    query_vector = model.encode(query, normalize_embeddings=True).tolist()
+    result = es.search(index='documents', body={
+        'knn': {
+            'field': 'embedding',
+            'query_vector': query_vector,
+            'k': k,
+            'num_candidates': 100
+        },
+        '_source': ['title', 'raw_text', 'source_uri']
+    })
+    return result['hits']['hits']
+ 
+# Uso:
+results = semantic_search('motor failure prediction industrial')
+for r in results:
+    print(r['_score'], r['_source']['title'][:80])
+ 
+Paso 5 — Orquestador run_pipeline.sh
+El script orquestador ejecuta las 3 fases en secuencia, recibiendo run_date como parámetro obligatorio.
+#!/bin/bash
+set -e  # detener ante cualquier error
+RUN_DATE=${1:-$(date +%Y-%m-%d)}
+MASTER='spark://192.168.1.100:7077'
+echo '[INFO] Iniciando pipeline Búsqueda Semántica para fecha: '$RUN_DATE
+
+echo '[INFO] === FASE 1: ETL NLP ==='
+spark-submit --master $MASTER --executor-memory 4g \
+  --total-executor-cores 6 src/etl_nlp.py --run-date $RUN_DATE
+
+echo '[INFO] === FASE 2: Inferencia Embeddings ==='
+spark-submit --master $MASTER --executor-memory 4g \
+  --total-executor-cores 6 src/spark_vectorizer.py --run-date $RUN_DATE
+
+echo '[INFO] === FASE 3: Indexar en Elasticsearch ==='
+spark-submit --master $MASTER --executor-memory 4g \
+  --jars /opt/spark/jars/elasticsearch-spark-30_2.12-8.13.0.jar \
+  src/indexer_elastic.py --run-date $RUN_DATE
+
+echo '[INFO] Pipeline completado exitosamente para '$RUN_DATE
+ 
+Entregables de la Semana 4
+Código src/indexer_elastic.py: escritura idempotente con es.mapping.id + es.write.operation=upsert.
+Demostración de idempotencia: ejecutar pipeline dos veces con misma fecha, mostrar conteo igual.
+Script scripts/run_pipeline.sh funcional (una invocación = pipeline completo).
+Demo end-to-end grabada de respaldo + demo en vivo para presentación.
+tests/test_indexer.py: test de idempotencia (insertar 100 docs, reinsertar, contar = 100).
+Notebook notebooks/prueba_busqueda.ipynb con al menos 5 consultas semánticas de ejemplo.
+Documento técnico final (8-15 páginas): problema, arquitectura, decisiones técnicas, resultados.
+README.md profesional: prerrequisitos, pasos de instalación, cómo lanzar el pipeline.
+Repositorio Git completo y organizado con commits balanceados entre los 3 integrantes.
+
+5. Configuraciones Adicionales
+ 
+5.1 Archivo conf/config.yaml
+ 
+Centralizar TODOS los parámetros aquí. Nunca hardcodear IPs, rutas o credenciales en el código fuente.
+# conf/config.yaml
+spark:
+  master: 'spark://192.168.1.100:7077'
+  executor_memory: '4g'
+  total_executor_cores: 6
+  shuffle_partitions: 60
+ 
+storage:
+  minio_endpoint: 'http://192.168.1.100:9000'
+  minio_access_key: 'admin'
+  minio_secret_key: 'admin12345'
+  raw_bucket: 's3a://raw'
+  chunks_path: 's3a://data/chunks'
+  embeddings_path: 's3a://data/embeddings'
+ 
+elasticsearch:
+  host: '192.168.1.100'
+  port: 9200
+  index: 'documents'
+  batch_size: 500
+ 
+nlp:
+  model: 'sentence-transformers/all-MiniLM-L6-v2'
+  embed_dim: 384
+  chunk_size: 256
+  chunk_overlap: 32
+  min_chunk_length: 30
+  encode_batch_size: 32
+ 
+tika:
+  server_url: 'http://192.168.1.100:9998/tika'
+ 
+5.2 Solución de Problemas Frecuentes
+ 
+Síntoma
+Causa probable
+Solución
+Worker no aparece en UI
+Firewall bloqueando puerto 7077
+Abrir puerto o desactivar firewall
+Job se queda en WAITING
+Recursos insuficientes en workers
+Reducir --executor-memory o --cores
+OOM en Pandas UDF
+batch_size demasiado grande
+Reducir batch_size a 8 o 16
+Modelo cargado N veces
+Sin truco hasattr(_model)
+Usar el patrón de carga lazy con hasattr
+Embeddings duplicados en ES
+Falta es.mapping.id
+Agregar .option('es.mapping.id','chunk_id')
+Tika timeout en PDFs
+PDF muy grande o corrupto
+Agregar timeout y manejo de excepción try/except
+IP cambia al reconectar WiFi
+DHCP dinámico
+Reservar IP estática en router o usar /etc/hosts
+ 
+5.3 Decisiones Técnicas a Documentar
+ 
+El documento técnico de arquitectura debe justificar explícitamente las siguientes decisiones:
+ 
+Modelo de embedding: all-MiniLM-L6-v2 elegido por balance velocidad/calidad. 384 dims vs 768 de modelos más grandes. Corre en CPU de laptops en ~5ms/chunk. Soporte multilenguaje limitado; para corpus ES puro considerar paraphrase-multilingual-MiniLM-L12-v2.
+Estrategia de chunking: 256 tokens con overlap de 32. El overlap evita perder contexto en los bordes de chunk. Documentos muy cortos (<30 tokens) se descartan. Justificación: límite del modelo vs granularidad de búsqueda.
+Configuración Elasticsearch: Índice con similitud coseno en lugar de dot product (embeddings normalizados). HNSW nativo para k-NN aproximado. Un shard por defecto para cluster pequeño.
+Estrategia de reindexado: Upsert por chunk_id (no borra el índice). Permite re-ejecutar sin perder históricos de semanas anteriores. Ventaja frente a delete-and-reload: si falla a mitad, los datos anteriores siguen disponibles.
+Almacenamiento compartido: MinIO (compatible S3) para que todos los workers lean desde la misma fuente. Alternativa: NFS. MinIO es más realista para producción y soporta acceso concurrente nativo.
+
+6. Cronograma Sugerido
+ 
+Distribución recomendada del trabajo dentro de cada semana para un equipo de 3 personas. Los días son orientativos; cada equipo debe adaptarlos a su disponibilidad real.
+ 
+Semana
+Lunes–Miércoles
+Jueves–Viernes
+Fin de semana (entrega)
+S1
+Instalar Java/Spark en todos los nodos. Configurar red y verificar conectividad. Levantar Elasticsearch y MinIO.
+Levantar cluster con 3 nodos. Job de prueba distribuido. Crear índice ES. Comenzar descarga dataset.
+Dataset 500K+ listo. Documento de diseño (4-6p). Capturas Spark UI. Repo Git inicializado.
+S2
+Implementar extract_text() y clean_text(). Probar Tika con PDFs locales. Implementar chunk_text().
+Implementar ETL distribuido con Pandas UDF. Lanzar sobre subconjunto de 10K docs. Depurar errores.
+ETL completo sobre 500K docs. CSVs de chunks generados. test_etl.py pasando. Reporte de ejecución.
+S3
+Implementar Pandas UDF embed(). Verificar carga lazy del modelo. Probar con 1000 chunks.
+Lanzar vectorización sobre corpus completo. Analizar Spark UI. Medir tiempo single vs cluster.
+Embeddings de 500K chunks generados. Capturas Spark UI. Comparativa de tiempos. test_vectorizer.py.
+S4
+Implementar indexer_elastic.py con upsert. Probar idempotencia con 1000 docs. Preparar run_pipeline.sh.
+Lanzar pipeline end-to-end completo. Probar búsquedas semánticas. Ensayar demo. Documento técnico final.
+Pipeline integrado funcionando. README profesional. Tests pasando. Presentación lista para demo en vivo.
+ 
+6.1 Estructura recomendada de la Presentación Final (15-20 min)
+ 
+Tiempo
+Sección
+Contenido
+2 min
+Contexto y problema
+¿Qué es búsqueda semántica? ¿Por qué Spark? Corpus usado y volumen.
+3 min
+Arquitectura y decisiones
+Diagrama de flujo. Decisiones: modelo, chunking, ES config, idempotencia.
+3 min
+Cluster Spark en vivo
+Mostrar Spark Master UI con 3 workers activos. Topología de red.
+7 min
+Demo end-to-end
+run_pipeline.sh en vivo. Spark UI durante inferencia. Búsquedas semánticas en ES.
+3 min
+Lecciones aprendidas
+Qué funcionó, qué costó, qué cambiarían.
+2 min
+Cierre
+Resumen. Bonificaciones aplicadas si las hay.
+5 min
+Preguntas técnicas
+Cualquier integrante debe poder responder cualquier pregunta.
+
+7. Checklist de Lanzamiento — Semana a Semana
+ 
+Usar esta lista como criterio de aceptación antes de cada entrega. Un ítem sin marcar es un riesgo para la nota.
+ 
+☑ Semana 1 — Infraestructura y Datos
+ 
+Java 17 instalado en TODOS los nodos (mismo JAVA_HOME)
+Apache Spark 3.5.1 en /opt/spark en TODOS los nodos
+Variables de entorno SPARK_HOME y PYSPARK_PYTHON configuradas
+Ping entre todas las laptops del equipo funcionando
+Cluster Spark levantado: Master en 192.168.1.100:7077
+Workers conectados y visibles en Spark Master UI (192.168.1.100:8080)
+Job de prueba ejecutado con distribución real entre workers
+Elasticsearch 8.x corriendo en Docker (puerto 9200 accesible)
+Índice 'documents' creado con campo dense_vector 384 dims coseno
+MinIO corriendo en Docker con bucket creado
+Dataset 500K+ documentos en MinIO/NFS
+scripts/generate_data.py con semilla fija y documentación de fuentes
+Repositorio Git: estructura estándar completa, 1+ commit por integrante
+conf/config.yaml con todos los parámetros (sin hardcodear)
+Documento de diseño técnico (4-6 páginas) entregado
+ 
+☑ Semana 2 — ETL NLP
+ 
+Servidor Apache Tika corriendo en puerto 9998
+extract_text() funciona para PDF, HTML y TXT
+clean_text() elimina artefactos Unicode, URLs, espacios
+chunk_text() produce chunks de ≤256 tokens con overlap
+Pandas UDF de ETL corre en workers (verificado en Spark UI)
+CSV de chunks tiene columnas: chunk_id, doc_id, title, source_uri, raw_text, ingestion_date
+Pipeline ETL ejecutado sobre 500K+ documentos completos
+Reporte de ejecución: tiempo, # docs leídos, # chunks generados
+Captura de Spark UI mostrando distribución real de tasks
+tests/test_etl.py: todos los tests pasando sobre muestra de 100 docs
+Particionado correcto: data/chunks/run_date=YYYY-MM-DD/
+ 
+☑ Semana 3 — Inferencia Distribuida
+ 
+Pandas UDF embed() implementada con carga lazy (hasattr trick)
+SentenceTransformer se carga UNA SOLA VEZ por executor (no por batch)
+NO hay .toPandas() antes de la UDF
+Vectorización ejecutada sobre corpus completo en el cluster
+Spark UI: tasks de inferencia distribuidas entre todos los workers
+Capturas de Spark UI con análisis: tasks, executors, tiempos
+Comparativa single-node vs cluster documentada (tabla de tiempos)
+Embeddings tienen dimensión 384 y norma unitaria (float32)
+Parquet/CSV de embeddings en data/embeddings/run_date=YYYY-MM-DD/
+tests/test_vectorizer.py: dimensión=384, no NaN, norma≈1.0
+Avance documento técnico: sección de inferencia con justificación
+ 
+☑ Semana 4 — Persistencia, Integración y Demo
+ 
+Conector elasticsearch-spark JAR descargado y funcional
+Carga masiva a Elasticsearch con es.write.operation=upsert
+es.mapping.id apunta a chunk_id (garantiza idempotencia)
+Prueba de idempotencia: ejecutar pipeline 2 veces = mismo conteo en índice
+run_pipeline.sh: ejecuta Fase 1, 2 y 3 con una sola invocación
+Búsquedas semánticas kNN funcionando (≥5 consultas de ejemplo)
+Notebook prueba_busqueda.ipynb con resultados documentados
+tests/test_indexer.py: test de idempotencia pasando
+Documento técnico final (8-15 páginas) completo
+README.md: prerrequisitos, instalación, uso paso a paso
+Repositorio Git: historial limpio, commits balanceados entre los 3 miembros
+Demo end-to-end ensayada al menos 2 veces antes de la presentación
+Cluster Spark listo para demo en vivo el día de la presentación
+ 
+☑ Bonificaciones Opcionales (hasta +10%)
+ 
++3% — Orquestar el pipeline con Apache Airflow (DAG con 3 tareas secuenciales)
++3% — Integrar tracking de experimentos con MLflow (parámetros, métricas)
++2% — Tests unitarios automatizados con pytest (CI básico)
++2% — Dashboard de monitoreo en Streamlit (conteo de docs, últimas búsquedas)
++2% — Usar Parquet/Delta Lake en lugar de CSVs en fases intermedias
+ 
+"El modelo es la parte chica. Construir el sistema que lo rodea es lo que importa."
+— Proyecto Integrador · Big Data · Inferencia en Batch con Apache Spark
