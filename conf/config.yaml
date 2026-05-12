@@ -2,6 +2,8 @@ run_date: "2026-05-12"
 
 spark:
   master: "spark://10.84.18.85:7077"
+  # IP del driver (opcional). null = en modo spark:// se intenta inferir la IP hacia el master.
+  driver_host: null
   app_name: "SemanticFlow"
   executor_memory: "4g"
   total_executor_cores: 6
@@ -27,6 +29,6 @@ elasticsearch:
 
 minio:
   endpoint: "http://10.84.18.85:9000"
-  access_key: "admin"
-  secret_key: "admin12345"
+  access_key: "minioadmin"
+  secret_key: "minioadmin123"
   bucket: "semantic-raw"

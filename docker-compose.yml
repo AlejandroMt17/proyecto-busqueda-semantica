@@ -10,6 +10,29 @@ services:
       - "9001:9001"
     volumes:
       - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Crea usuarios/buckets de aplicación al levantar el stack.
+  # Idempotente: si el usuario/bucket ya existe, no rompe.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin123 &&
+        (mc admin user add local admin admin12345 || true) &&
+        (mc admin policy attach local readwrite --user admin || true) &&
+        (mc mb -p local/semantic-raw || true) &&
+        (mc mb -p local/semantic-tabular || true) &&
+        echo 'MinIO bootstrap OK'
+      "
+    restart: "no"
 
   # Apache Tika (opcional): extracción PDF/DOCX vía API. ETL usa fallback pypdf/python-docx si Tika no responde.
   tika:

@@ -89,6 +89,9 @@ def apply_s3_conf(spark: SparkSession, args: argparse.Namespace) -> None:
     hconf = spark.sparkContext._jsc.hadoopConfiguration()
     hconf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     hconf.set("fs.s3a.path.style.access", "true")
+    # Evita NativeIO$Windows.access0 en Windows: bufferiza los uploads en memoria.
+    hconf.set("fs.s3a.fast.upload", "true")
+    hconf.set("fs.s3a.fast.upload.buffer", "bytebuffer")
     ep = args.s3_endpoint.strip()
     if ep.startswith("http://"):
         ep = ep[len("http://") :]
