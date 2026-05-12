@@ -11,5 +11,11 @@ services:
     volumes:
       - minio_data:/data
 
+  # Apache Tika (opcional): extracción PDF/DOCX vía API. ETL usa fallback pypdf/python-docx si Tika no responde.
+  tika:
+    image: apache/tika:latest
+    ports:
+      - "9998:9998"
+
 volumes:
   minio_data:

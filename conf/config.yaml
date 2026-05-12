@@ -7,7 +7,7 @@ spark:
 
 paths:
   raw: "data/raw/arxiv_sample.jsonl"
-  chunks: "data/chunks"
+  chunks: "data/features"
   embeddings: "data/embeddings"
 
 model:

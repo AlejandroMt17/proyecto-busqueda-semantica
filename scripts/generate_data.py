@@ -209,6 +209,8 @@ def write_docs_shard(
     seed: int,
     start_id: int,
     count: int,
+    source_uri_prefix: str = "synthetic://semantic-raw/text/v1",
+    source_updated: str | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(path, "wt", encoding="utf-8", newline="\n") as gz:
@@ -218,7 +220,10 @@ def write_docs_shard(
                 "id": doc_id,
                 "title": f"Documento sintético seed={seed} id={doc_id}",
                 "text": synthetic_body(rng, doc_id),
+                "source_uri": f"{source_uri_prefix}/doc/{doc_id}",
             }
+            if source_updated:
+                record["source_updated"] = source_updated
             gz.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -281,6 +286,11 @@ def check_endpoint(client, endpoint: str) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Dataset reproducible + MinIO (S3).")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Semilla fija (numpy).")
+    p.add_argument(
+        "--source-updated",
+        default=None,
+        help="Si se define (YYYY-MM-DD), cada documento JSON incluye source_updated para filtros incrementales en el ETL.",
+    )
     p.add_argument("--docs", type=int, default=DEFAULT_DOCS, help="Cantidad de documentos JSONL.")
     p.add_argument(
         "--tabular-rows",
@@ -360,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
         while start < args.docs:
             n = min(shard, args.docs - start)
             tmp = local_out / f"docs_part_{shard_idx:05d}.jsonl.gz"
-            write_docs_shard(tmp, rng, args.seed, start, n)
+            write_docs_shard(tmp, rng, args.seed, start, n, source_updated=args.source_updated)
             key = f"{args.prefix_docs}/docs_part_{shard_idx:05d}.jsonl.gz"
             if client is not None:
                 upload_file(client, args.bucket_docs, key, tmp)
