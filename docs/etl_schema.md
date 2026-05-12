@@ -4,6 +4,7 @@ Salida por defecto (convención del PDF del curso):
 
 `data/features/run_date=<YYYY-MM-DD>/`
 
+
 (varios `part-*.csv.gz` + `_SUCCESS`, cabecera en la primera línea).
 
 Opcionalmente se puede duplicar la misma tabla en MinIO con `--output-s3a s3a://.../run_date=.../`.
