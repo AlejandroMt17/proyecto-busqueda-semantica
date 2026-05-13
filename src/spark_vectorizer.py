@@ -82,10 +82,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--s3-endpoint", default=minio.get("endpoint", "http://127.0.0.1:9000"))
     p.add_argument("--s3-access-key", default=minio.get("access_key", "minioadmin"))
     p.add_argument("--s3-secret-key", default=minio.get("secret_key", "minioadmin123"))
+    p.add_argument("--s3-bucket", default=minio.get("bucket", "semantic-raw"))
     p.add_argument("--model-name", default=DEFAULT_MODEL)
     p.add_argument("--embedding-dims", type=int, default=DEFAULT_EMBEDDING_DIMS)
     p.add_argument("--encode-batch-size", type=int, default=32)
     p.add_argument("--num-partitions", type=int, default=0, help=">0 para reparticionar antes del UDF.")
+    p.add_argument(
+        "--skip-stats",
+        action="store_true",
+        help=(
+            "Salta count() pre-write. Útil para no recorrer dos veces los datos "
+            "y reducir presión de memoria en local[*]."
+        ),
+    )
+    p.add_argument(
+        "--cache-intermediate",
+        action="store_true",
+        help=(
+            "Aplica .cache() al DataFrame final antes de escribir (recomendable "
+            "sólo con --output-s3a y memoria suficiente)."
+        ),
+    )
+    p.add_argument(
+        "--validate-output",
+        action="store_true",
+        help=(
+            "Tras escribir, lee una muestra del Parquet y verifica que existan "
+            "filas y que `embedding` tenga la dimensión esperada."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -147,17 +172,51 @@ def make_embed_pandas_udf(model_name: str, encode_batch_size: int, expected_dims
     return embed_text_batches
 
 
+def _validate_output(spark: SparkSession, path: str, expected_dims: int) -> None:
+    """Lee una muestra del Parquet y valida count > 0 y dimensión de `embedding`."""
+    logger.info("Validando salida en %s ...", path)
+    df = spark.read.parquet(path)
+    cols = set(df.columns)
+    required = {"chunk_key", "doc_id", "chunk_id", "embedding"}
+    missing = required - cols
+    if missing:
+        raise RuntimeError(f"Parquet de salida sin columnas requeridas: {missing}")
+    sample = df.limit(5).collect()
+    if not sample:
+        raise RuntimeError(f"Parquet de salida vacío: {path}")
+    bad = [r for r in sample if r["embedding"] is None or len(r["embedding"]) != expected_dims]
+    if bad:
+        raise RuntimeError(
+            f"`embedding` con dimensión inesperada en {len(bad)}/{len(sample)} filas; "
+            f"esperaba {expected_dims}."
+        )
+    logger.info(
+        "Validación OK — sample=%d filas, dims=%d, primera chunk_key=%s",
+        len(sample), expected_dims, sample[0]["chunk_key"],
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+
+    master_is_cluster = str(args.master).startswith("spark://")
+
     in_path = args.input_glob
     if not in_path:
-        in_path = str((REPO_ROOT / "data" / "features" / f"run_date={args.run_date}").resolve())
+        if master_is_cluster:
+            in_path = f"s3a://{args.s3_bucket}/features/run_date={args.run_date}/"
+        else:
+            in_path = str((REPO_ROOT / "data" / "features" / f"run_date={args.run_date}").resolve())
 
-    out_local = args.output_dir
-    if not out_local:
-        d = REPO_ROOT / "data" / "embeddings" / f"run_date={args.run_date}"
-        d.mkdir(parents=True, exist_ok=True)
-        out_local = str(d.resolve())
+    out_local: str | None = args.output_dir
+    out_s3a: str | None = args.output_s3a
+    if not out_local and not out_s3a:
+        if master_is_cluster:
+            out_s3a = f"s3a://{args.s3_bucket}/embeddings/run_date={args.run_date}/"
+        else:
+            d = REPO_ROOT / "data" / "embeddings" / f"run_date={args.run_date}"
+            d.mkdir(parents=True, exist_ok=True)
+            out_local = str(d.resolve())
 
     logger.info(
         "Inicio Fase 2 run_date=%s master=%s input=%s out_local=%s out_s3a=%s model=%s dims=%s",
@@ -165,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         args.master,
         in_path,
         out_local,
-        args.output_s3a,
+        out_s3a,
         args.model_name,
         args.embedding_dims,
     )
@@ -173,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     spark: SparkSession | None = None
     try:
         spark = build_spark(args)
-        if str(in_path).startswith("s3a://") or (args.output_s3a and str(args.output_s3a).startswith("s3a://")):
+        if str(in_path).startswith("s3a://") or (out_s3a and str(out_s3a).startswith("s3a://")):
             apply_s3_conf(spark, args)
 
         df = spark.read.option("header", True).option("inferSchema", True).csv(in_path)
@@ -207,22 +266,39 @@ def main(argv: list[str] | None = None) -> int:
             col_or_null("ingestion_date"),
             "embedding",
         )
-        n = 0
-        df_final.cache()
+
+        will_double_pass = (out_local is not None) and (out_s3a is not None)
+        cached = False
+        if args.cache_intermediate or will_double_pass:
+            df_final = df_final.cache()
+            cached = True
+
+        n: int | None = None
         try:
-            n = df_final.count()
-            logger.info("Filas vectorizadas: %s", n)
+            if not args.skip_stats:
+                n = df_final.count()
+                logger.info("Filas vectorizadas: %s", n)
 
-            df_final.write.mode("overwrite").parquet(out_local)
-            logger.info("Parquet local: %s", out_local)
-
-            if args.output_s3a:
-                df_final.write.mode("overwrite").parquet(args.output_s3a)
-                logger.info("Parquet S3A: %s", args.output_s3a)
+            if out_local:
+                df_final.write.mode("overwrite").parquet(out_local)
+                logger.info("Parquet local: %s", out_local)
+            if out_s3a:
+                df_final.write.mode("overwrite").parquet(out_s3a)
+                logger.info("Parquet S3A: %s", out_s3a)
         finally:
-            df_final.unpersist()
+            if cached:
+                df_final.unpersist()
 
-        logger.info("Cierre OK — duración_s=%.2f filas=%s", time.perf_counter() - t0, n)
+        if args.validate_output:
+            target = out_s3a or out_local
+            if target:
+                _validate_output(spark, target, args.embedding_dims)
+
+        logger.info(
+            "Cierre OK — duración_s=%.2f filas=%s",
+            time.perf_counter() - t0,
+            n if n is not None else "n/a",
+        )
         return 0
     except Exception:
         logger.error("Vectorizador falló:\n%s", traceback.format_exc())
