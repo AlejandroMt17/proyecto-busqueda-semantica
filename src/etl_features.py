@@ -10,7 +10,10 @@ hacia el host del master (evita ``host.docker.internal`` en Windows). Puedes
 forzar una IP con ``--driver-host``, ``spark.driver_host`` en ``config.yaml``
 o la variable ``SPARK_DRIVER_HOST``.
 
-    spark-submit --master spark://10.84.18.85:7077 \\
+    La IP del cluster/MinIO se centraliza en ``conf/config.yaml`` (``network.host``)
+    o con la variable de entorno ``SEMANTIC_SEARCH_HOST``.
+
+    spark-submit --master spark://<tu-ip>:7077 \\
         --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \\
         src/etl_features.py ...
 
@@ -29,7 +32,7 @@ import socket
 import sys
 from pathlib import Path
 
-import yaml
+from project_config import load_project_config
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -46,11 +49,6 @@ log = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "conf" / "config.yaml"
 DEFAULT_PACKAGES = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
-
-
-def load_config(path: str | Path) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 def parse_args(argv: list[str], cfg: dict) -> argparse.Namespace:
@@ -331,7 +329,7 @@ def apply_s3_conf(spark: SparkSession, args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    cfg = load_config(DEFAULT_CONFIG)
+    cfg = load_project_config(DEFAULT_CONFIG)
     args = parse_args(argv or sys.argv[1:], cfg)
 
     if not args.run_date:

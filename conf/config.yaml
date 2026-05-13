@@ -1,7 +1,12 @@
+# IP única del entorno (MinIO :9000, Spark master :7077, Elasticsearch, etc.).
+# Sin tocar el archivo:  $env:SEMANTIC_SEARCH_HOST="10.x.x.x"  (PowerShell)
+network:
+  host: "10.177.48.85"
+
 run_date: "2026-05-12"
 
 spark:
-  master: "spark://10.84.18.85:7077"
+  master: "spark://{network.host}:7077"
   # IP del driver (opcional). null = en modo spark:// se intenta inferir la IP hacia el master.
   driver_host: null
   app_name: "SemanticFlow"
@@ -22,13 +27,13 @@ model:
   batch_size: 32
 
 elasticsearch:
-  host: "10.84.18.85"
+  host: "{network.host}"
   port: 9200
   index: "documents"
   dims: 384
 
 minio:
-  endpoint: "http://10.84.18.85:9000"
-  access_key: "minioadmin"
-  secret_key: "minioadmin123"
+  endpoint: "http://{network.host}:9000"
+  access_key: "admin"
+  secret_key: "admin12345"
   bucket: "semantic-raw"

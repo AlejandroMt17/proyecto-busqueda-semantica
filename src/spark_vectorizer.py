@@ -8,7 +8,8 @@ Lee la salida de Fase 1 (CSV gzip con cabecera) y escribe Parquet con una column
 La inferencia usa Pandas UDF en modo *Scalar Iterator* para cargar el modelo
 una sola vez por partición (evita penalización por no estar distribuido).
 
-Ejemplo local:
+Ejemplo local (IP y MinIO por defecto desde ``conf/config.yaml``; sin editar archivo:
+``SEMANTIC_SEARCH_HOST``):
 
   spark-submit --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \\
     src/spark_vectorizer.py --run-date 2026-05-12 --master "local[*]"
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 import traceback
@@ -25,6 +27,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
+from project_config import load_project_config
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.functions import pandas_udf
 from pyspark.sql.types import ArrayType, FloatType
@@ -38,6 +41,7 @@ logger = logging.getLogger("spark_vectorizer")
 
 DEFAULT_PACKAGES = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = REPO_ROOT / "conf" / "config.yaml"
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_EMBEDDING_DIMS = 384
 
@@ -46,7 +50,19 @@ def chunk_row_key(doc_id: str, chunk_id: int) -> str:
     return f"{doc_id}_{int(chunk_id)}"
 
 
-def parse_args(argv: list[str]) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    if argv is None:
+        argv = sys.argv[1:]
+    cfg_path = DEFAULT_CONFIG
+    cfg = load_project_config(cfg_path) if cfg_path.is_file() else {}
+    minio = cfg.get("minio") or {}
+    spark_cfg = cfg.get("spark") or {}
+    cfg_driver_host = spark_cfg.get("driver_host")
+    if isinstance(cfg_driver_host, str):
+        cfg_driver_host = cfg_driver_host.strip() or None
+    if not cfg_driver_host:
+        cfg_driver_host = os.environ.get("SPARK_DRIVER_HOST") or None
+
     p = argparse.ArgumentParser(description="Fase 2 — embeddings (Spark + Pandas UDF).")
     p.add_argument("--run-date", required=True, help="Misma partición que Fase 1 (YYYY-MM-DD).")
     p.add_argument(
@@ -60,12 +76,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Salida Parquet local. Por defecto: data/embeddings/run_date=<fecha>/.",
     )
     p.add_argument("--output-s3a", default=None, help="Copia adicional s3a://.../run_date=.../")
-    p.add_argument("--master", default="local[*]")
-    p.add_argument("--driver-host", default=None)
+    p.add_argument("--master", default=spark_cfg.get("master", "local[*]"))
+    p.add_argument("--driver-host", default=cfg_driver_host)
     p.add_argument("--jars-packages", default=DEFAULT_PACKAGES)
-    p.add_argument("--s3-endpoint", default="http://127.0.0.1:9000")
-    p.add_argument("--s3-access-key", default="minioadmin")
-    p.add_argument("--s3-secret-key", default="minioadmin123")
+    p.add_argument("--s3-endpoint", default=minio.get("endpoint", "http://127.0.0.1:9000"))
+    p.add_argument("--s3-access-key", default=minio.get("access_key", "minioadmin"))
+    p.add_argument("--s3-secret-key", default=minio.get("secret_key", "minioadmin123"))
     p.add_argument("--model-name", default=DEFAULT_MODEL)
     p.add_argument("--embedding-dims", type=int, default=DEFAULT_EMBEDDING_DIMS)
     p.add_argument("--encode-batch-size", type=int, default=32)
