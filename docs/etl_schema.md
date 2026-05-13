@@ -9,30 +9,34 @@ Salida por defecto (convención del PDF del curso):
 
 Opcionalmente se puede duplicar la misma tabla en MinIO con `--output-s3a s3a://.../run_date=.../`.
 
-## Columnas (tabla de featuress) 
-## toris
-
+## Columnas (tabla de features)
 
 | Columna | Tipo (CSV) | Descripción |
 |---------|------------|-------------|
-| `doc_id` | string | Identificador estable del documento: `id` del JSON o *hash* SHA1 truncado de la ruta S3/local del archivo binario. |
-| `chunk_id` | entero | Índice del fragmento (0…N) tras segmentar por **tokens** con solapamiento (`--overlap-tokens`, default 32), ventana máxima `--max-tokens-per-chunk` (default 256) y el mismo tokenizer que el modelo de embeddings; fallback por caracteres si falla el tokenizer. Los trozos más cortos que `--min-chunk-chars` (default 30) se descartan salvo que no quede ninguno (en cuyo caso se conservan los no vacíos). |
-| `title` | string | Título del documento (metadato JSON) o nombre de archivo inferido de la ruta. |
-| `source_uri` | string | URI lógica de la fuente: campo `source_uri` del JSON si existe; si no, prefijo sintético; en archivos binarios la ruta `path` devuelta por `binaryFile`. |
-| `raw_text` | string | Texto del **chunk** ya limpio (NFKC, espacios, boilerplate simple removido). Equivale al cuerpo que consumirá la Fase 2. |
-| `ingestion_date` | string (`YYYY-MM-DD`) | Fecha de ingesta al pipeline; por defecto `--ingestion-date` o `--run-date`. |
+| `doc_id` | string | Identificador estable del documento: `id` del JSON. |
+| `chunk_id` | entero | Índice del fragmento **dentro del documento** (0…N). Se genera segmentando `raw_text` por **tokens** del tokenizer del modelo de embeddings (`--tokenizer-model`, default `sentence-transformers/all-MiniLM-L6-v2`), con ventana `--max-tokens-per-chunk` (default 256) y solapamiento `--overlap-tokens` (default 32). Chunks con < `--min-chunk-tokens` (default 30) o < `--min-chunk-chars` (default 30) se descartan, salvo que el documento sólo produzca uno corto: en ese caso se conserva íntegro para no perderlo. Con `--word-tokenization` se cuenta por palabras (offline). |
+| `title` | string | Título del documento (campo `title` del JSON). |
+| `source_uri` | string | URI lógica de la fuente: glob/path del JSON de entrada (`--input-json-glob`). |
+| `raw_text` | string | Texto del **chunk** ya limpio (normalización Unicode y colapso de espacios). Equivale al cuerpo que consumirá la Fase 2. |
+| `ingestion_date` | string (`YYYY-MM-DD`) | Fecha de ingesta al pipeline, igual a `--run-date`. |
 
-## Entradas soportadas :
+## Entradas soportadas
 
-1. **JSONL(.gz)** vía `--input-json-glob` (Spark `read.json`): campos mínimos `id`, `title`, `text`; opcionales `source_uri`, `source_updated` (para `--since-date`).
-2. **Archivos** vía `--input-files-glob` y `binaryFile`: `.pdf`, `.docx`, `.html`/`.htm`, `.txt`/`.md` (y otros con Tika si está activo).
+**JSONL(.gz)** vía `--input-json-glob` (Spark `read.json`): el esquema por defecto es `id STRING, text STRING, title STRING` (`--input-schema`). Si el JSON usa otros nombres, el script intenta mapear automáticamente entre estos candidatos:
 
-## Extracción y limpieza
+- `doc_id` ← `doc_id` | `id` | `arxiv_id` | `paper_id`
+- `raw_text` ← `raw_text` | `abstract` | `text` | `body` | `content`
+- `title` ← `title` (opcional)
 
-- **PDF/DOCX**: primero **Apache Tika** (`--tika-endpoint`, p. ej. `http://127.0.0.1:9998` con `docker compose`); si falla, **pypdf** / **python-docx**.
-- **HTML**: **BeautifulSoup** + eliminación de `script`, `style`, `nav`, etc.
-- **Limpieza**: normalización **Unicode NFKC**, colapso de espacios/saltos, líneas largas de separadores, frases tipo *confidential* genéricas.
+## Limpieza
 
-## Reproducibilidad incremental
+- Se filtran filas con `raw_text` nulo y con `length(raw_text) <= 50`.
+- `regexp_replace` colapsa espacios/saltos y elimina caracteres no ASCII.
+- A nivel chunk, los textos se reconstruyen a partir de los offsets de tokens del tokenizer (preservan la puntuación original).
 
-Si los JSON incluyen `source_updated`, podés filtrar con `--since-date YYYY-MM-DD` para aproximar “documentos nuevos desde la última corrida”.
+## Decisión de chunking (sección 5.4 del PDF)
+
+- **Tokenizer:** el mismo del modelo de Fase 2 (`all-MiniLM-L6-v2`), para que el conteo de tokens sea el real del modelo. Se desactiva la truncation interna del tokenizer para ver todo el documento.
+- **Tamaño / overlap:** 256 / 32 (parametrizables vía `--max-tokens-per-chunk` y `--overlap-tokens`, defaults desde `conf/config.yaml` → `model.max_tokens` / `model.overlap_tokens`).
+- **Documentos cortos:** si el documento entero tiene menos tokens que `--min-chunk-tokens` se conserva como un único chunk (se evita perder información).
+- **Modo offline:** `--word-tokenization` cuenta por palabras (no descarga modelo HF); menos preciso pero útil sin red.

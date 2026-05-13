@@ -3,7 +3,9 @@
 Fase 1 — ETL de features para búsqueda semántica.
 
 Lee metadata de arXiv (JSON o JSONL[.gz]) desde MinIO/S3 vía s3a y escribe
-chunks limpios en CSV particionado por `run_date`.
+chunks limpios en CSV particionado por `run_date`. Los chunks se generan por
+ventana deslizante en **tokens** del tokenizer del modelo de embeddings
+(default 256 con solapamiento 32; ver sección 5 del PDF del proyecto).
 
 Ejemplo cluster: si no pasas ``--driver-host``, se infiere la IP de salida
 hacia el host del master (evita ``host.docker.internal`` en Windows). Puedes
@@ -30,14 +32,18 @@ import os
 import re
 import socket
 import sys
+import unicodedata
 from pathlib import Path
 
 from project_config import load_project_config
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, split, trim, monotonically_increasing_id, lit,
-    regexp_replace, length, count, sum as sum_, when,
+    col, trim, lit, regexp_replace, length, count, sum as sum_, when,
+    explode, pandas_udf,
+)
+from pyspark.sql.types import (
+    ArrayType, IntegerType, StringType, StructField, StructType,
 )
 
 logging.basicConfig(
@@ -50,15 +56,184 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "conf" / "config.yaml"
 DEFAULT_PACKAGES = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
 
+DEFAULT_MAX_TOKENS = 256
+DEFAULT_OVERLAP_TOKENS = 32
+DEFAULT_MIN_CHUNK_TOKENS = 30
+DEFAULT_MIN_CHUNK_CHARS = 30
+DEFAULT_TOKENIZER = "sentence-transformers/all-MiniLM-L6-v2"
+
+CHUNK_STRUCT = StructType([
+    StructField("chunk_id", IntegerType(), nullable=False),
+    StructField("raw_text", StringType(), nullable=False),
+    StructField("n_tokens", IntegerType(), nullable=False),
+])
+
+
+def normalize_unicode(text: str | None) -> str:
+    return unicodedata.normalize("NFKC", text or "")
+
+
+_BOILER_LINE = re.compile(r"^\s*[-=_*•·]{3,}\s*$", flags=re.MULTILINE)
+_MANY_SPACES = re.compile(r"[ \t\u00a0]+")
+_MANY_BLANKLINES = re.compile(r"\n{3,}")
+
+
+def clean_boilerplate(text: str | None) -> str:
+    """Limpieza ligera previa al chunking: normaliza saltos y colapsa whitespace."""
+    if not text:
+        return ""
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    t = _BOILER_LINE.sub("", t)
+    t = _MANY_SPACES.sub(" ", t)
+    t = _MANY_BLANKLINES.sub("\n\n", t)
+    return t.strip()
+
+
+def title_from_path(path: str | None) -> str:
+    if not path:
+        return ""
+    return path.rstrip("/").rsplit("/", 1)[-1]
+
+
+def chunk_by_chars(text: str | None, max_chars: int) -> list[str]:
+    """Fallback simple por caracteres (sólo usado como red de seguridad)."""
+    t = (text or "").strip()
+    if not t:
+        return []
+    if max_chars <= 0 or len(t) <= max_chars:
+        return [t]
+    return [t[i : i + max_chars] for i in range(0, len(t), max_chars)]
+
+
+def filter_chunks_by_min_chars(parts: list[str], min_chars: int) -> list[str]:
+    """Quita chunks < min_chars; si todos son cortos, devuelve los no vacíos."""
+    keep = [p for p in parts if len(p) >= min_chars]
+    if keep:
+        return keep
+    return [p for p in parts if p]
+
+
+def _word_offsets(text: str) -> list[tuple[int, int]]:
+    return [(m.start(), m.end()) for m in re.finditer(r"\S+", text or "")]
+
+
+def _load_hf_tokenizer(model_name: str):
+    """Carga el tokenizer HF (offsets-aware). Devuelve None si no está disponible.
+
+    Desactiva truncation/padding internos: queremos ver TODOS los tokens del texto
+    para poder ventanear con --max-tokens-per-chunk; el modelo de Fase 2 ya
+    truncará por su cuenta a su `max_seq_length`.
+    """
+    try:
+        from tokenizers import Tokenizer  # type: ignore
+    except Exception:
+        return None
+    try:
+        tok = Tokenizer.from_pretrained(model_name)
+    except Exception:
+        return None
+    try:
+        tok.no_truncation()
+    except Exception:
+        pass
+    try:
+        tok.no_padding()
+    except Exception:
+        pass
+    return tok
+
+
+def _token_offsets(text: str, tokenizer) -> list[tuple[int, int]]:
+    """Lista de offsets (start, end) en `text`, en orden, sin tokens especiales."""
+    if not text:
+        return []
+    if tokenizer is None:
+        return _word_offsets(text)
+    enc = tokenizer.encode(text, add_special_tokens=False)
+    return [(s, e) for s, e in enc.offsets if e > s]
+
+
+def _split_text_into_chunks(
+    text: str,
+    offsets: list[tuple[int, int]],
+    max_tokens: int,
+    overlap_tokens: int,
+    min_chunk_tokens: int,
+    min_chunk_chars: int,
+) -> list[dict]:
+    """Ventana deslizante sobre offsets de tokens. Devuelve lista de chunks."""
+    text = text or ""
+    n = len(offsets)
+    if n == 0 or not text.strip():
+        return []
+    max_tokens = max(1, max_tokens)
+    overlap = max(0, min(overlap_tokens, max_tokens - 1))
+    stride = max(1, max_tokens - overlap)
+
+    out: list[dict] = []
+    i = 0
+    while i < n:
+        j = min(i + max_tokens, n)
+        start_char = offsets[i][0]
+        end_char = offsets[j - 1][1]
+        piece = text[start_char:end_char].strip()
+        n_tokens = j - i
+        if n_tokens >= min_chunk_tokens and len(piece) >= min_chunk_chars and piece:
+            out.append({"chunk_id": len(out), "raw_text": piece, "n_tokens": int(n_tokens)})
+        if j == n:
+            break
+        i += stride
+
+    if not out:
+        full = text.strip()
+        if full and len(full) >= min_chunk_chars:
+            out.append({"chunk_id": 0, "raw_text": full, "n_tokens": int(min(n, max_tokens))})
+    return out
+
+
+def make_chunk_udf(
+    tokenizer_model: str,
+    max_tokens: int,
+    overlap_tokens: int,
+    min_chunk_tokens: int,
+    min_chunk_chars: int,
+    use_word_tokenization: bool,
+):
+    """Pandas UDF: raw_text (string) -> array<struct<chunk_id,raw_text,n_tokens>>."""
+
+    @pandas_udf(ArrayType(CHUNK_STRUCT))
+    def _chunk(texts):  # pd.Series -> pd.Series
+        import pandas as pd
+
+        tok = None if use_word_tokenization else _load_hf_tokenizer(tokenizer_model)
+        results = []
+        for raw in texts.fillna("").astype(str):
+            t = raw
+            offs = _token_offsets(t, tok)
+            results.append(_split_text_into_chunks(
+                t, offs, max_tokens, overlap_tokens, min_chunk_tokens, min_chunk_chars,
+            ))
+        return pd.Series(results)
+
+    return _chunk
+
 
 def parse_args(argv: list[str], cfg: dict) -> argparse.Namespace:
     minio = cfg.get("minio", {})
     spark_cfg = cfg.get("spark", {})
+    model_cfg = cfg.get("model", {}) or {}
     cfg_driver_host = spark_cfg.get("driver_host")
     if isinstance(cfg_driver_host, str):
         cfg_driver_host = cfg_driver_host.strip() or None
     if not cfg_driver_host:
         cfg_driver_host = os.environ.get("SPARK_DRIVER_HOST") or None
+
+    cfg_model_name = (model_cfg.get("name") or "").strip()
+    cfg_tokenizer = (
+        f"sentence-transformers/{cfg_model_name}"
+        if cfg_model_name and "/" not in cfg_model_name
+        else (cfg_model_name or DEFAULT_TOKENIZER)
+    )
 
     p = argparse.ArgumentParser(description="Fase 1 — ETL features (Spark).")
     p.add_argument("--run-date", default=cfg.get("run_date"),
@@ -147,6 +322,47 @@ def parse_args(argv: list[str], cfg: dict) -> argparse.Namespace:
         help=(
             "DDL del JSON de entrada para evitar la inferencia (mucho más rápido con .jsonl.gz). "
             "Usa 'auto' para inferir esquema (lento)."
+        ),
+    )
+
+    p.add_argument(
+        "--max-tokens-per-chunk",
+        type=int,
+        default=int(model_cfg.get("max_tokens") or DEFAULT_MAX_TOKENS),
+        help="Tamaño máximo de cada chunk en tokens del tokenizer (default 256).",
+    )
+    p.add_argument(
+        "--overlap-tokens",
+        type=int,
+        default=int(model_cfg.get("overlap_tokens") or DEFAULT_OVERLAP_TOKENS),
+        help="Solapamiento entre chunks consecutivos en tokens (default 32).",
+    )
+    p.add_argument(
+        "--min-chunk-tokens",
+        type=int,
+        default=int(model_cfg.get("min_chunk_tokens") or DEFAULT_MIN_CHUNK_TOKENS),
+        help="Mínimo de tokens para conservar un chunk (default 30).",
+    )
+    p.add_argument(
+        "--min-chunk-chars",
+        type=int,
+        default=DEFAULT_MIN_CHUNK_CHARS,
+        help="Mínimo de caracteres para conservar un chunk (default 30).",
+    )
+    p.add_argument(
+        "--tokenizer-model",
+        default=cfg_tokenizer,
+        help=(
+            "Repo HF del tokenizer para contar tokens (default: el del modelo de Fase 2). "
+            "La primera ejecución descarga `tokenizer.json` desde Hugging Face."
+        ),
+    )
+    p.add_argument(
+        "--word-tokenization",
+        action="store_true",
+        help=(
+            "Forzar tokenización por palabras (no descarga modelo HF). "
+            "Útil offline; menos exacto en conteo de tokens."
         ),
     )
     return p.parse_args(argv)
@@ -461,19 +677,34 @@ def main(argv: list[str] | None = None) -> int:
             .withColumn("raw_text", regexp_replace(col("raw_text"), r"[^\x00-\x7F]+", ""))
         )
 
-        # 1 abstract/documento = 1 chunk (texto corto). Cache solo si se pide
-        # explícitamente (en local[*] con poca RAM produce OOM).
+        log.info(
+            "Segmentando en chunks (max_tokens=%s, overlap=%s, min_tokens=%s, tokenizer=%s%s)",
+            args.max_tokens_per_chunk,
+            args.overlap_tokens,
+            args.min_chunk_tokens,
+            args.tokenizer_model,
+            " | word-fallback" if args.word_tokenization else "",
+        )
+        chunk_fn = make_chunk_udf(
+            tokenizer_model=args.tokenizer_model,
+            max_tokens=args.max_tokens_per_chunk,
+            overlap_tokens=args.overlap_tokens,
+            min_chunk_tokens=args.min_chunk_tokens,
+            min_chunk_chars=args.min_chunk_chars,
+            use_word_tokenization=args.word_tokenization,
+        )
         chunked = (
             cleaned
-            .withColumn("chunk_id", monotonically_increasing_id())
+            .withColumn("_chunks", chunk_fn(col("raw_text")))
+            .withColumn("_c", explode(col("_chunks")))
             .withColumn("source_uri", lit(input_path))
             .withColumn("ingestion_date", lit(args.run_date))
             .select(
                 col("doc_id"),
-                col("chunk_id"),
+                col("_c.chunk_id").alias("chunk_id"),
                 col("title"),
                 col("source_uri"),
-                col("raw_text"),
+                col("_c.raw_text").alias("raw_text"),
                 col("ingestion_date"),
             )
         )
