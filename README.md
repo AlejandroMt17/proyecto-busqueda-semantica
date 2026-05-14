@@ -50,16 +50,17 @@ proyecto/
 ├── data/
 │   ├── raw/              # Documentos crudos descargados
 │   ├── features/         # Salida Fase 1 (CSV gzip: chunks)
-│   └── embeddings/       # Salida Fase 2 (Parquet: vectores 384d)
+│   └── predictions/      # Salida Fase 2 (CSV: chunk_id, doc_id, embedding_json, …)
 ├── models/               # (opcional) modelo cacheado HF
 ├── src/
 │   ├── etl_features.py   # Fase 1 — ETL de documentos
-│   ├── spark_vectorizer.py   # Fase 2 — Pandas UDF + SentenceTransformer
-│   ├── batch_inference.py    # Alias de entrada a Fase 2 (mismo código)
-│   └── persistence.py    # Fase 3 — Indexado en Elasticsearch (pendiente)
+│   ├── batch_inference.py   # Fase 2 — Pandas UDF + SentenceTransformer (entrada principal)
+│   ├── spark_vectorizer.py  # Compat: reexporta batch_inference
+│   └── persistence.py    # Fase 3 — Indexado en Elasticsearch (upsert por chunk_id)
 ├── tests/
 │   ├── test_etl.py
-│   └── test_vectorizer.py
+│   ├── test_vectorizer.py
+│   └── test_persistence.py
 ├── scripts/
 │   ├── generate_data.py        # Dataset sintético + carga a MinIO
 │   ├── validate_etl_quality.py# Chequeos de calidad salida Fase 1
@@ -68,7 +69,8 @@ proyecto/
 │   ├── start_minio_windows.ps1
 │   ├── run_etl_windows.ps1     # Ejemplo spark-submit ETL (Windows)
 │   ├── run_vectorizer_windows.ps1
-│   └── run_pipeline.sh         # Fase 1 + Fase 2 (bash)
+│   ├── run_pipeline.sh         # Fase 1 + Fase 2 + Fase 3 (bash)
+│   └── run_pipeline_windows.ps1
 ├── notebooks/            # Exploración (no es entregable principal)
 └── docs/
     ├── arquitectura.md   # Diagrama y decisiones técnicas
@@ -197,7 +199,7 @@ Misma línea de `spark-submit` con la **fecha de corte** pedida por el docente, 
 
 Registrar en `docs/arquitectura.md` decisiones de la Fase 1 (lectura S3A, chunking, particiones de salida, riesgos y mitigaciones).
 
-### Tests unitarios (Fase 1 y utilidades Fase 2)
+### Tests unitarios (Fases 1–3 y utilidades)
 
 ```powershell
 pip install -r requirements.txt
@@ -206,11 +208,11 @@ python -m pytest tests/ -q
 
 ---
 
-## Fase 2 — Embeddings (`src/spark_vectorizer.py`)
+## Fase 2 — Inferencia (`src/batch_inference.py`)
 
-Lee `data/features/run_date=<fecha>/` (salida del ETL) y escribe **`data/embeddings/run_date=<fecha>/`** en **Parquet** con columnas `chunk_key`, `doc_id`, `chunk_id`, metadatos opcionales y `embedding` (lista de 384 `float`).
+Lee `data/features/run_date=<fecha>/` (salida del ETL) y escribe por defecto **`data/predictions/run_date=<fecha>/`** en **CSV** con `embedding_json` (vector 384d serializado; Spark no escribe `ArrayType` en CSV de forma portable). Opcional: `--output-format parquet|both`.
 
-La inferencia usa **Pandas UDF** en modo *Scalar Iterator*: el modelo `sentence-transformers/all-MiniLM-L6-v2` se carga **una vez por partición** en cada executor (requisito del enunciado: evitar `.toPandas()` masivo en el driver).
+La inferencia usa **Pandas UDF** en modo *Scalar Iterator*: el modelo (p. ej. `sentence-transformers/all-MiniLM-L6-v2`) se carga **una vez por partición** en cada executor (sin `.toPandas()` masivo en el driver).
 
 **Dependencias en cada nodo que ejecute tareas:** el mismo `pip install -r requirements.txt` (incluye `sentence-transformers` y `torch`).
 
@@ -220,39 +222,58 @@ Solo PC local (Fase 1 ya generó CSV bajo `data/features/...`):
 $env:SPARK_HOME = "C:\spark"
 $pkg = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
 & "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkg `
-  src/spark_vectorizer.py `
+  src/batch_inference.py `
   --run-date 2026-05-12 `
   --master "local[*]" `
-  --s3-endpoint http://127.0.0.1:9000
+  --skip-stats `
+  --validate-output
 ```
 
 Con datos en MinIO (ajustá bucket/prefijo al tuyo):
 
 ```powershell
 & "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkg `
-  src/spark_vectorizer.py `
+  src/batch_inference.py `
   --run-date 2026-05-12 `
   --master spark://10.84.18.85:7077 `
   --driver-host 10.84.18.85 `
   --input-glob "s3a://semantic-raw/features/run_date=2026-05-12/*.csv" `
-  --output-s3a "s3a://semantic-raw/embeddings/run_date=2026-05-12/" `
+  --output-s3a "s3a://semantic-raw/predictions/run_date=2026-05-12/" `
   --s3-endpoint http://10.84.18.85:9000
 ```
 
-Plantilla: `scripts/run_vectorizer_windows.ps1`.
+Plantilla: `scripts/run_vectorizer_windows.ps1` (llama a `batch_inference.py`). `spark_vectorizer.py` sigue siendo punto de entrada compatible.
+
+---
+
+## Fase 3 — Persistencia (`src/persistence.py`)
+
+Lee `data/predictions/run_date=<fecha>/`, crea el índice Elasticsearch con `dense_vector` si no existe y escribe con **upsert** por `chunk_id` (re-ejecución idempotente).
+
+Requiere Elasticsearch en marcha (p. ej. `docker compose up -d`) y el conector Ivy:
+
+`org.elasticsearch:elasticsearch-spark-30_2.12:8.13.0`
+
+```powershell
+$pkgEs = "org.elasticsearch:elasticsearch-spark-30_2.12:8.13.0"
+& "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkgEs `
+  src/persistence.py --run-date 2026-05-12 --master "local[*]" --es-host 127.0.0.1
+```
 
 ---
 
 ## Cómo ejecutar el pipeline completo
 
-Variables opcionales: `S3_ENDPOINT` (default `http://127.0.0.1:9000`).
+Variables opcionales: `S3_ENDPOINT` (default `http://127.0.0.1:9000`), `ES_HOST` (default `127.0.0.1` en `run_pipeline_windows.ps1`), `PERSISTENCE_PACKAGES` si necesitás combinar JARs (p. ej. S3A + ES en cluster).
 
 ```bash
 bash scripts/run_pipeline.sh 2026-05-10
 bash scripts/run_pipeline.sh 2026-05-10 spark://192.168.1.100:7077
 ```
 
-Encadena **Fase 1 (ETL)** y **Fase 2 (embeddings)**. La **Fase 3** (persistencia en Elasticsearch) se añadirá cuando exista `persistence.py`.
+En Windows: `.\scripts\run_pipeline_windows.ps1` (usa `RUN_DATE` del `config.yaml` si no definís `$env:RUN_DATE`).
+
+Encadena **Fase 1 (ETL)**, **Fase 2 (inferencia CSV)** y **Fase 3 (Elasticsearch)**.
 
 ---
 

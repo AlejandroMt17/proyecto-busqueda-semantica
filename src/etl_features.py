@@ -739,7 +739,12 @@ def main(argv: list[str] | None = None) -> int:
             .csv(output_path)
         )
 
-        log.info("ETL Fase 1 completado exitosamente — %s registros escritos", total)
+        if args.skip_stats:
+            log.info(
+                "ETL Fase 1 completado — escritura OK (sin conteo previo; --skip-stats activo).",
+            )
+        else:
+            log.info("ETL Fase 1 completado exitosamente — %s registros escritos", total)
         if args.cache_intermediate:
             chunked.unpersist()
         return 0

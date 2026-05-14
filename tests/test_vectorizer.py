@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from spark_vectorizer import chunk_row_key
+from batch_inference import chunk_row_key
 
 
 def test_chunk_row_key_stable():
