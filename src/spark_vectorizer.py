@@ -10,3 +10,4 @@ __all__ = ["chunk_row_key", "main"]
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# georg - configuracion Semana 3 
