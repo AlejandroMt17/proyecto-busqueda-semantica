@@ -52,7 +52,7 @@ $pkg = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.1
 $submit = Join-Path $env:SPARK_HOME "bin\spark-submit.cmd"
 $app = Join-Path $Repo "src\etl_features.py"
 
-$extra = $pyConfs + @(
+$extra = @(
     "--run-date", $RunDate,
     "--master", "spark://$($lanIp):7077",
     "--driver-host", $lanIp,
@@ -66,6 +66,7 @@ if ($SkipStats) { $extra += "--skip-stats" }
 if ($WordTokenization) { $extra += "--word-tokenization" }
 
 Write-Host "ETL arXiv RUN_DATE=$RunDate input=$InputGlob" -ForegroundColor Cyan
-& $submit --packages $pkg $app @extra
+# --conf es de spark-submit; debe ir ANTES del .py (si va despues, etl_features.py lo rechaza).
+& $submit --packages $pkg @pyConfs $app @extra
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "Siguiente: .\scripts\paso05_validar_etl.ps1 -RunDate $RunDate" -ForegroundColor Yellow
