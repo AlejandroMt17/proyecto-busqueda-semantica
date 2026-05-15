@@ -481,6 +481,16 @@ def build_spark(args: argparse.Namespace, use_s3a: bool) -> SparkSession:
             .config("spark.rpc.askTimeout", "1200s")
             .config("spark.executor.heartbeatInterval", "60s")
         )
+    driver_py = (os.environ.get("PYSPARK_DRIVER_PYTHON") or os.environ.get("PYSPARK_PYTHON") or "").strip()
+    if driver_py:
+        b = b.config("spark.pyspark.driver.python", driver_py)
+    if str(args.master).startswith("spark://"):
+        exec_py = (os.environ.get("SPARK_EXECUTOR_PYTHON") or "python").strip()
+        b = b.config("spark.pyspark.python", exec_py)
+        log.info("spark.pyspark.python=%s (executors: PATH por nodo)", exec_py)
+    elif driver_py:
+        b = b.config("spark.pyspark.python", driver_py)
+        log.info("spark.pyspark.python=%s (local: mismo que driver)", driver_py)
     if args.no_spark_packages and use_s3a:
         ex = (args.executor_s3_jars or "").strip()
         if ex:

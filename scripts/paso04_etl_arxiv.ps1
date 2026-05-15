@@ -28,7 +28,7 @@ $pyConfs = Get-PasoSparkSubmitPythonConfs -Repo $Repo
 if ($Pilot) {
     $pilotLocal = Join-Path $Repo "data\raw\arxiv_pilot_5k.jsonl"
     $pilotKey = "arxiv-pilot-5k.jsonl"
-    $src = "C:\Users\crism\Downloads\archive (2)\arxiv-metadata-oai-snapshot.json"
+    $src = Join-Path $Repo "data\raw\arxiv-metadata-oai-snapshot.json"
     if (-not (Test-Path -LiteralPath $pilotLocal)) {
         New-Item -ItemType Directory -Force -Path (Split-Path $pilotLocal) | Out-Null
         Write-Host "Generando muestra 5000 lineas -> $pilotLocal" -ForegroundColor Yellow

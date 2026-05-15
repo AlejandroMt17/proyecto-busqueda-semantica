@@ -84,6 +84,7 @@ function Get-PasoSparkSubmitPythonConfs {
 
     return @(
         "--conf", "spark.pyspark.driver.python=$driverPy",
+        # Ejecutores: comando en el PATH de cada worker (no ruta absoluta del PC del driver).
         "--conf", "spark.pyspark.python=$executorPy"
     )
 }
