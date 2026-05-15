@@ -17,10 +17,10 @@ function Wait-Http($url) {
     return $false
 }
 
-if (-not (Wait-Http "http://127.0.0.1:9000/minio/health/live")) { throw "MinIO no respondió en :9000" }
-if (-not (Wait-Http "http://127.0.0.1:9200")) { throw "Elasticsearch no respondió en :9200" }
+if (-not (Wait-Http "http://127.0.0.1:9000/minio/health/live")) { throw "MinIO no respondio en :9000" }
+if (-not (Wait-Http "http://127.0.0.1:9200")) { throw "Elasticsearch no respondio en :9200" }
 
-Write-Host "OK — MinIO consola: http://127.0.0.1:9001 (minioadmin / minioadmin123)" -ForegroundColor Green
-Write-Host "OK — API S3 app: http://127.0.0.1:9000 (admin / admin12345 tras minio-init)" -ForegroundColor Green
-Write-Host "OK — Elasticsearch: http://127.0.0.1:9200" -ForegroundColor Green
+Write-Host "OK - MinIO consola: http://127.0.0.1:9001 (minioadmin / minioadmin123)" -ForegroundColor Green
+Write-Host "OK - API S3 app: http://127.0.0.1:9000 (admin / admin12345 tras minio-init)" -ForegroundColor Green
+Write-Host "OK - Elasticsearch: http://127.0.0.1:9200" -ForegroundColor Green
 Write-Host "Siguiente: .\scripts\paso02_subir_arxiv.ps1" -ForegroundColor Yellow

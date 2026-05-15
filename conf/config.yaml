@@ -1,14 +1,16 @@
 # IP única del entorno (MinIO :9000, Spark master :7077, Elasticsearch, etc.).
 # Sin tocar el archivo:  $env:SEMANTIC_SEARCH_HOST="10.x.x.x"  (PowerShell)
 network:
-  host: "10.233.207.85"
+  host: "192.168.100.26"
 
-run_date: "2026-05-14"
+run_date: "2026-05-15"
 
 spark:
   master: "spark://{network.host}:7077"
   # IP del driver (opcional). null = en modo spark:// se intenta inferir la IP hacia el master.
   driver_host: null
+  # Python en workers (IP distinta al driver). "python" = PATH del worker; o ruta absoluta identica en todos.
+  executor_python: "python"
   app_name: "SemanticFlow"
   executor_memory: "4g"
   total_executor_cores: 6

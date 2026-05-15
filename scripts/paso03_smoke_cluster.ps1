@@ -7,36 +7,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "_paso_common.ps1")
+
 $env:SPARK_HOME = if ($env:SPARK_HOME) { $env:SPARK_HOME } else { "C:\spark" }
-
-$resolveCfg = @"
-import sys
-sys.path.insert(0, r'$Repo\src')
-from project_config import load_project_config
-cfg = load_project_config(r'$Repo\conf\config.yaml')
-print((cfg.get('network') or {}).get('host') or '')
-"@
-$hostIp = (& python -c $resolveCfg).Trim()
-if (-not $hostIp) {
-    if ($env:SEMANTIC_SEARCH_HOST) { $hostIp = $env:SEMANTIC_SEARCH_HOST.Trim() }
-    elseif ($env:SPARK_MASTER_HOST) { $hostIp = $env:SPARK_MASTER_HOST.Trim() }
-}
-if (-not $hostIp) { throw "Definí network.host en conf/config.yaml o SEMANTIC_SEARCH_HOST" }
-
-$env:SEMANTIC_SEARCH_HOST = $hostIp
-$driverHost = $hostIp
+$lanIp = Get-PasoNetworkHost
+$env:SEMANTIC_SEARCH_HOST = $lanIp
 
 $examplesDir = Join-Path $env:SPARK_HOME "examples\jars"
 $jar = Get-ChildItem -LiteralPath $examplesDir -Filter "spark-examples_*.jar" -File | Select-Object -First 1
-if (-not $jar) { throw "No se encontró spark-examples_*.jar en $examplesDir" }
+if (-not $jar) { throw "No se encontro spark-examples_*.jar en $examplesDir" }
 
-$masterUrl = "spark://${hostIp}:7077"
+$masterUrl = "spark://$($lanIp):7077"
 $submit = Join-Path $env:SPARK_HOME "bin\spark-submit.cmd"
 
 Write-Host "Master: $masterUrl" -ForegroundColor Cyan
-Write-Host "spark.driver.host=$driverHost" -ForegroundColor Cyan
-Write-Host "Abrí http://${driverHost}:4040 mientras corre." -ForegroundColor Yellow
+Write-Host "spark.driver.host=$($lanIp)" -ForegroundColor Cyan
+Write-Host "Abri http://$($lanIp):4040 mientras corre." -ForegroundColor Yellow
 
 & $submit `
     --class org.apache.spark.examples.SparkPi `
@@ -45,7 +31,7 @@ Write-Host "Abrí http://${driverHost}:4040 mientras corre." -ForegroundColor Ye
     --driver-memory $DriverMemory `
     --executor-memory $ExecutorMemory `
     --total-executor-cores $TotalExecutorCores `
-    --conf "spark.driver.host=$driverHost" `
+    --conf "spark.driver.host=$($lanIp)" `
     --conf "spark.driver.bindAddress=0.0.0.0" `
     $jar.FullName `
     $Slices
