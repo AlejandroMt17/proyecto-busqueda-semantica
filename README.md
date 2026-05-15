@@ -24,7 +24,7 @@ de "falla de combustión" aunque no compartan palabras exactas.
 - Python 3.10+
 - Sentence-Transformers (all-MiniLM-L6-v2)
 - Elasticsearch 8.13
-- MinIO (almacenamiento S3 local)
+- MinIO (S3 compatible, vía API en la red del laboratorio)
 - Docker
 
 ---
@@ -66,6 +66,9 @@ proyecto/
 │   ├── validate_etl_quality.py# Chequeos de calidad salida Fase 1
 │   ├── start_master.sh
 │   ├── start_worker.sh
+│   ├── start_master_windows.ps1
+│   ├── start_worker_windows.ps1
+│   ├── smoke_cluster_windows.ps1  # SparkPi — evidencia cluster Semana 1
 │   ├── start_minio_windows.ps1
 │   ├── run_etl_windows.ps1     # Ejemplo spark-submit ETL (Windows)
 │   ├── run_vectorizer_windows.ps1
@@ -87,6 +90,8 @@ bash scripts/start_master.sh
 Verificar en el navegador: http://192.168.1.100:8080
 Deben aparecer los workers conectados.
 
+**Job trivial para la demo Semana 1 (SparkPi + capturas UI):** con workers visibles, desde el driver (`SEMANTIC_SEARCH_HOST` = IP de esa máquina) ejecutá `.\scripts\smoke_cluster_windows.ps1 -MasterHost "192.168.1.100"`.
+
 ### En cada laptop Worker
 
 **Linux / WSL / Git Bash:**
@@ -105,6 +110,15 @@ set SPARK_MASTER_URL=spark://10.84.18.85:7077
 %SPARK_HOME%\sbin\start-worker.cmd %SPARK_MASTER_URL%
 ```
 
+**Windows (PowerShell), con `SPARK_CONF_DIR` del repo y fallback Git Bash:**
+
+```powershell
+$env:SPARK_HOME = "C:\spark"
+$env:SPARK_MASTER_URL = "spark://10.84.18.85:7077"
+cd D:\ruta\al\repo\proyecto-busqueda-semantica
+.\scripts\start_worker_windows.ps1
+```
+
 #### Qué debe tener listo cada worker (PySpark + MinIO)
 
 1. **Java 17** y **Apache Spark 3.5.1** alineados con el master.
@@ -113,21 +127,36 @@ set SPARK_MASTER_URL=spark://10.84.18.85:7077
 4. **Python**: con `spark-submit` en modo habitual (*client*), el driver ejecuta el Python del nodo donde lanzás el job; igual conviene **misma versión mayor (p. ej. 3.10)** en el equipo para evitar incompatibilidades.
 5. **No** copiar el dataset al disco del worker: los executors leen/escriben **MinIO** por red.
 
+#### Windows y S3A: `winutils.exe` (error “Could not locate Hadoop executable”)
+
+No hace falta instalar un cluster Hadoop aparte. En **cada** PC Windows que ejecute workers (o el driver) con rutas `s3a://`, la JVM de Hadoop busca **`winutils.exe`** y **`hadoop.dll`** en `%HADOOP_HOME%\bin`; en la práctica `HADOOP_HOME` suele ser igual a `SPARK_HOME`.
+
+Si en el log ves algo como `C:\spark351\bin\winutils.exe` en un worker (`192.168.56.1`, etc.), en **esa máquina** instalá los binarios en esa ruta:
+
+```powershell
+cd <RAIZ_DEL_REPO>
+.\scripts\install_winutils_windows.ps1 -SparkHome 'C:\spark351'
+```
+
+(`-SparkHome` debe ser el **mismo** directorio raíz de Spark que usa ese worker en `SPARK_HOME`.) Repetí en cada Windows del equipo. Alternativa: unificar todos con el mismo `SPARK_HOME` (ej. `C:\spark`) y una sola instalación de winutils.
+
+Documentación de fondo: [Hadoop on Windows](https://wiki.apache.org/hadoop/WindowsProblems).
+
 ---
 
 ## Semana 2 — Fase 1: ETL (`src/etl_features.py`)
 
 Cumple el enunciado típico: **parámetros** (`--run-date`, rutas S3A, `--master`, `--s3-endpoint`, `--driver-host`), **logging** `INFO` al inicio y al cierre (con conteos y duración en segundos) y **`ERROR` + traceback** ante fallos.
 
-### Ejecutar el ETL (master como driver, MinIO en el master)
+### Ejecutar el ETL (cluster `spark://` + MinIO en IP LAN)
 
-Levantá también **Tika** si querés extracción PDF/DOCX por servidor (opcional; hay fallback local):
+Levantá también **Tika** si querés extracción PDF/DOCX por servidor (opcional; si Tika no responde, el ETL usa librerías en el worker).
 
 ```powershell
 docker compose up -d
 ```
 
-Desde la raíz del repo (ajustá IP y fecha). Salida por defecto: **`data/features/run_date=<fecha>/`** (PDF). Copia opcional a MinIO con `--output-s3a`.
+Por defecto el ETL escribe features en **`s3a://<bucket>/features/run_date=<fecha>/`** (config `minio.bucket` + `network.host`). Ajustá IP, fecha y Tika.
 
 ```powershell
 $env:SPARK_HOME = "C:\spark"
@@ -138,19 +167,7 @@ $pkg = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.1
   --master spark://10.84.18.85:7077 `
   --s3-endpoint http://10.84.18.85:9000 `
   --driver-host 10.84.18.85 `
-  --tika-endpoint http://10.84.18.85:9998 `
-  --output-s3a s3a://semantic-raw/features/run_date=2026-05-12/
-```
-
-**Solo tu PC** (MinIO y Tika en `localhost`, salida local):
-
-```powershell
-& "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkg `
-  src/etl_features.py `
-  --run-date 2026-05-12 `
-  --master "local[*]" `
-  --s3-endpoint http://127.0.0.1:9000 `
-  --tika-endpoint http://127.0.0.1:9998
+  --tika-endpoint http://10.84.18.85:9998
 ```
 
 **Archivos crudos en MinIO** (PDF/HTML/…): subilos bajo un prefijo, por ejemplo `s3a://semantic-raw/upload/...` y ejecutá con:
@@ -167,33 +184,23 @@ Ver `docs/etl_schema.md` (nombre, tipo y propósito de cada columna).
 
 ### Prueba de calidad
 
-Tras el ETL (lectura desde **carpeta local** generada por defecto):
+Tras el ETL, validá la salida en **MinIO** (misma `run_date`) vía `spark-submit` al cluster:
 
 ```powershell
 $env:SPARK_HOME = "C:\spark"
 $pkg = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
-$feat = "D:\Users\crism\OneDrive\Documentos\GitHub\proyecto-busqueda-semantica\data\features\run_date=2026-05-12"
+$ip = "10.84.18.85"
 & "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkg `
-  scripts/validate_etl_quality.py `
-  --input-glob ($feat -replace "\\", "/") `
-  --expected-min-rows 1000
-```
-
-*(Ajustá la ruta `run_date=...`; si usás solo `file://`, escapá según Spark en Windows.)*
-
-Desde **S3A**:
-
-```powershell
-& "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkg `
+  --master "spark://${ip}:7077" --driver-host $ip `
   scripts/validate_etl_quality.py `
   --input-glob "s3a://semantic-raw/features/run_date=2026-05-12/*.csv" `
-  --s3-endpoint http://10.84.18.85:9000 `
+  --s3-endpoint "http://${ip}:9000" `
   --expected-min-rows 1000
 ```
 
 ### Demo en clase (15 min)
 
-Misma línea de `spark-submit` con la **fecha de corte** pedida por el docente, Spark UI abierta mientras corre, y en MinIO / descarga parcial mostrar un **CSV** de salida (cabecera + algunas filas).
+Misma línea de `spark-submit` con la **fecha de corte** pedida por el docente, Spark UI abierta mientras corre, y en MinIO mostrar un **CSV** de salida (cabecera + algunas filas).
 
 ### Actualización del documento técnico
 
@@ -210,13 +217,11 @@ python -m pytest tests/ -q
 
 ## Fase 2 — Inferencia (`src/batch_inference.py`)
 
-Lee `data/features/run_date=<fecha>/` (salida del ETL) y escribe por defecto **`data/predictions/run_date=<fecha>/`** en **CSV** con `embedding_json` (vector 384d serializado; Spark no escribe `ArrayType` en CSV de forma portable). Opcional: `--output-format parquet|both`.
+Lee por defecto **`s3a://…/features/run_date=<fecha>/`** y escribe **`s3a://…/predictions/run_date=<fecha>/`** en **CSV** con `embedding_json` (vector 384d serializado; Spark no escribe `ArrayType` en CSV de forma portable). Opcional: `--output-format parquet|both`.
 
 La inferencia usa **Pandas UDF** en modo *Scalar Iterator*: el modelo (p. ej. `sentence-transformers/all-MiniLM-L6-v2`) se carga **una vez por partición** en cada executor (sin `.toPandas()` masivo en el driver).
 
 **Dependencias en cada nodo que ejecute tareas:** el mismo `pip install -r requirements.txt` (incluye `sentence-transformers` y `torch`).
-
-Solo PC local (Fase 1 ya generó CSV bajo `data/features/...`):
 
 ```powershell
 $env:SPARK_HOME = "C:\spark"
@@ -224,56 +229,60 @@ $pkg = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.1
 & "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkg `
   src/batch_inference.py `
   --run-date 2026-05-12 `
-  --master "local[*]" `
-  --skip-stats `
-  --validate-output
-```
-
-Con datos en MinIO (ajustá bucket/prefijo al tuyo):
-
-```powershell
-& "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkg `
-  src/batch_inference.py `
-  --run-date 2026-05-12 `
   --master spark://10.84.18.85:7077 `
   --driver-host 10.84.18.85 `
-  --input-glob "s3a://semantic-raw/features/run_date=2026-05-12/*.csv" `
-  --output-s3a "s3a://semantic-raw/predictions/run_date=2026-05-12/" `
+  --skip-stats `
+  --validate-output `
   --s3-endpoint http://10.84.18.85:9000
 ```
 
-Plantilla: `scripts/run_vectorizer_windows.ps1` (llama a `batch_inference.py`). `spark_vectorizer.py` sigue siendo punto de entrada compatible.
+*(Rutas `--input-glob` / `--output-s3a` son opcionales si coinciden con los defaults en bucket `semantic-raw`.)*
+
+Plantilla: `scripts/run_vectorizer_windows.ps1`. `spark_vectorizer.py` sigue siendo punto de entrada compatible.
 
 ---
 
 ## Fase 3 — Persistencia (`src/persistence.py`)
 
-Lee `data/predictions/run_date=<fecha>/`, crea el índice Elasticsearch con `dense_vector` si no existe y escribe con **upsert** por `chunk_id` (re-ejecución idempotente).
+Lee por defecto **`s3a://…/predictions/run_date=<fecha>/`**, crea el índice Elasticsearch con `dense_vector` si no existe y escribe con **upsert** por `chunk_id` (re-ejecución idempotente).
 
-Requiere Elasticsearch en marcha (p. ej. `docker compose up -d`) y el conector Ivy:
+Requiere Elasticsearch en marcha (p. ej. `docker compose up -d`) en una IP alcanzable desde el driver y los executors, y el conector Ivy:
 
 `org.elasticsearch:elasticsearch-spark-30_2.12:8.13.0`
 
 ```powershell
-$pkgEs = "org.elasticsearch:elasticsearch-spark-30_2.12:8.13.0"
+$pkgEs = "org.elasticsearch:elasticsearch-spark-30_2.12:8.13.0,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
+$ip = "10.84.18.85"
 & "$env:SPARK_HOME\bin\spark-submit.cmd" --packages $pkgEs `
-  src/persistence.py --run-date 2026-05-12 --master "local[*]" --es-host 127.0.0.1
+  src/persistence.py --run-date 2026-05-12 `
+  --master spark://${ip}:7077 --driver-host $ip `
+  --es-host $ip --s3-endpoint http://${ip}:9000
 ```
 
 ---
 
 ## Cómo ejecutar el pipeline completo
 
-Variables opcionales: `S3_ENDPOINT` (default `http://127.0.0.1:9000`), `ES_HOST` (default `127.0.0.1` en `run_pipeline_windows.ps1`), `PERSISTENCE_PACKAGES` si necesitás combinar JARs (p. ej. S3A + ES en cluster).
+El script orquesta las tres fases **solo en modo cluster** (`spark://` según `network.host` o `SEMANTIC_SEARCH_HOST`). Variables opcionales: `ES_HOST` (default: misma IP que `network.host`), `INPUT_JSON_GLOB`, `PERSISTENCE_PACKAGES`, `EXECUTOR_HADOOP_HOME`, `SPARK_EXECUTOR_PYTHON`.
 
 ```bash
-bash scripts/run_pipeline.sh 2026-05-10
+export S3_ENDPOINT="http://192.168.1.100:9000"
+export ES_HOST="192.168.1.100"
 bash scripts/run_pipeline.sh 2026-05-10 spark://192.168.1.100:7077
 ```
 
-En Windows: `.\scripts\run_pipeline_windows.ps1` (usa `RUN_DATE` del `config.yaml` si no definís `$env:RUN_DATE`).
+En Windows (misma convención de IP):
 
-Encadena **Fase 1 (ETL)**, **Fase 2 (inferencia CSV)** y **Fase 3 (Elasticsearch)**.
+```powershell
+$env:SEMANTIC_SEARCH_HOST = "10.84.18.85"
+$env:ES_HOST = "10.84.18.85"
+cd D:\ruta\al\repo\proyecto-busqueda-semantica
+.\scripts\run_pipeline_windows.ps1
+```
+
+(`RUN_DATE` sale de `config.yaml` si no definís `$env:RUN_DATE`.)
+
+Encadena **Fase 1 (ETL)**, **Fase 2 (inferencia CSV en S3A)** y **Fase 3 (Elasticsearch)**.
 
 ---
 
