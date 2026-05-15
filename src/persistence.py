@@ -3,8 +3,8 @@
 Fase 3 — Persistencia en Elasticsearch (manual: Proyecto 1, sección 5.2).
 
 Lee los CSV de Fase 2 (``embedding_json`` + metadatos), asegura el índice con
-``dense_vector`` y escribe con **upsert** por ``chunk_id`` (re-ejecución semanal
-idempotente).
+``dense_vector`` y escribe con **upsert** usando ``chunk_key`` = ``doc_id`` + ``_`` + ``chunk_id``
+como ``_id`` en ES (único globalmente; ``chunk_id`` solo se repite por documento).
 
 Usa el conector ``org.elasticsearch.spark.sql`` (elasticsearch-hadoop).
 
@@ -58,6 +58,7 @@ def ensure_index(
     body: dict[str, Any] = {
         "mappings": {
             "properties": {
+                "chunk_key": {"type": "keyword"},
                 "chunk_id": {"type": "keyword"},
                 "doc_id": {"type": "keyword"},
                 "run_date": {"type": "keyword"},
@@ -170,11 +171,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return ns
 
 
+def _es_auth(args: argparse.Namespace) -> tuple[str, str] | None:
+    u = getattr(args, "_es_user", None)
+    p = getattr(args, "_es_password", None)
+    if u and p:
+        return u, p
+    return None
+
+
 def build_spark(args: argparse.Namespace) -> SparkSession:
     b = (
         SparkSession.builder.appName(f"persistence_{args.run_date}")
         .master(args.master)
         .config("spark.jars.packages", args.jars_packages)
+    )
+    # elasticsearch-hadoop lee es.* del SparkConf en los executores; spark.conf.set post-sesión
+    # no siempre se propaga y termina en 127.0.0.1:9200 en workers remotos.
+    auth = _es_auth(args)
+    b = (
+        b.config("es.nodes", args.es_host)
+        .config("es.port", str(args.es_port))
+        .config("es.nodes.wan.only", "true")
+        .config("es.index.auto.create", "false")
+    )
+    if auth:
+        b = b.config("es.net.http.auth.user", auth[0]).config("es.net.http.auth.pass", auth[1])
+    if getattr(args, "es_use_ssl", False):
+        b = b.config("es.net.ssl", "true")
+    logger.info(
+        "SparkConf ES: es.nodes=%s es.port=%s wan.only=true ssl=%s",
+        args.es_host,
+        args.es_port,
+        getattr(args, "es_use_ssl", False),
     )
     driver_py = (os.environ.get("PYSPARK_DRIVER_PYTHON") or os.environ.get("PYSPARK_PYTHON") or "").strip()
     if driver_py:
@@ -195,14 +223,6 @@ def build_spark(args: argparse.Namespace) -> SparkSession:
 def _es_base_url(args: argparse.Namespace) -> str:
     scheme = "https" if args.es_use_ssl else "http"
     return f"{scheme}://{args.es_host}:{args.es_port}"
-
-
-def _es_auth(args: argparse.Namespace) -> tuple[str, str] | None:
-    u = getattr(args, "_es_user", None)
-    p = getattr(args, "_es_password", None)
-    if u and p:
-        return u, p
-    return None
 
 
 def verify_es_count(base_url: str, index: str, run_date: str, auth: tuple[str, str] | None) -> int:
@@ -258,7 +278,13 @@ def main(argv: list[str] | None = None) -> int:
             F.from_json(F.col("embedding_json"), ArrayType(FloatType())),
         )
         text_col = F.col("raw_text").cast("string") if "raw_text" in raw.columns else F.lit("").cast("string")
+        chunk_key_col = (
+            F.col("chunk_key").cast("string")
+            if "chunk_key" in emb.columns
+            else F.concat_ws("_", F.col("doc_id").cast("string"), F.col("chunk_id").cast("string"))
+        )
         df_es = emb.select(
+            chunk_key_col.alias("chunk_key"),
             F.col("chunk_id").cast("string").alias("chunk_id"),
             F.col("doc_id").cast("string").alias("doc_id"),
             F.lit(args.run_date).cast("string").alias("run_date"),
@@ -269,16 +295,8 @@ def main(argv: list[str] | None = None) -> int:
         n = df_es.count()
         logger.info("Registros a indexar: %s", n)
 
-        spark.conf.set("es.nodes", args.es_host)
-        spark.conf.set("es.port", str(args.es_port))
-        spark.conf.set("es.nodes.wan.only", "true")
-        spark.conf.set("es.index.auto.create", "false")
-        if auth:
-            spark.conf.set("es.net.http.auth.user", auth[0])
-            spark.conf.set("es.net.http.auth.pass", auth[1])
-
         df_es.write.format("org.elasticsearch.spark.sql").option("es.resource", args.es_index).option(
-            "es.mapping.id", "chunk_id"
+            "es.mapping.id", "chunk_key"
         ).option("es.write.operation", "upsert").mode("append").save()
 
         cnt = verify_es_count(base_url, args.es_index, args.run_date, auth)
