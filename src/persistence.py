@@ -184,9 +184,9 @@ def build_spark(args: argparse.Namespace) -> SparkSession:
         if driver_py:
             b = b.config("spark.pyspark.python", driver_py)
     else:
-        exec_py = (os.environ.get("SPARK_EXECUTOR_PYTHON") or "").strip()
-        if exec_py:
-            b = b.config("spark.pyspark.python", exec_py)
+        exec_py = (os.environ.get("SPARK_EXECUTOR_PYTHON") or "python").strip()
+        b = b.config("spark.pyspark.python", exec_py)
+        logger.info("spark.pyspark.python=%s (executors: PATH por nodo)", exec_py)
     if args.driver_host:
         b = b.config("spark.driver.host", args.driver_host).config("spark.driver.bindAddress", "0.0.0.0")
     return b.getOrCreate()

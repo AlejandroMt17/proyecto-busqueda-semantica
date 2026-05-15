@@ -311,7 +311,7 @@ Instalá [Docker Desktop para Windows](https://www.docker.com/products/docker-de
 **Alternativa sin Docker:** en una consola PowerShell aparte (dejala abierta):
 
 ```powershell
-cd D:\Users\crism\OneDrive\Documentos\GitHub\proyecto-busqueda-semantica
+cd C:\ruta\al\repo\proyecto-busqueda-semantica
 .\scripts\start_minio_windows.ps1
 ```
 

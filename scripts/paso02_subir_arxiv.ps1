@@ -1,6 +1,6 @@
 # Paso 2: subir arxiv-metadata-oai-snapshot.json a MinIO (bucket semantic-raw)
 param(
-    [string]$SourcePath = "C:\Users\crism\Downloads\archive (2)\arxiv-metadata-oai-snapshot.json",
+    [string]$SourcePath = "",
     [string]$S3Key = "arxiv-metadata-oai-snapshot.json",
     [string]$Endpoint = "http://127.0.0.1:9000",
     [string]$Bucket = "semantic-raw",
@@ -11,6 +11,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent $PSScriptRoot
+if (-not $SourcePath) {
+    $SourcePath = Join-Path $Repo "data\raw\arxiv-metadata-oai-snapshot.json"
+}
 if (-not (Test-Path -LiteralPath $SourcePath)) {
     throw "No existe el archivo: $SourcePath"
 }

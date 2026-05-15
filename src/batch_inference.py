@@ -67,10 +67,11 @@ def check_driver_python_deps() -> None:
             f"Python del driver ({exe}) no tiene dependencias de Fase 2: {', '.join(missing)}.\n"
             "Instala en el MISMO entorno que usa spark-submit:\n"
             f"  \"{exe}\" -m pip install pyarrow sentence-transformers torch\n"
-            "En Windows, exporta antes:\n"
-            "  $env:PYSPARK_PYTHON = '.\\.venv\\Scripts\\python.exe'\n"
-            "  $env:PYSPARK_DRIVER_PYTHON = $env:PYSPARK_PYTHON\n"
-            "o pasa --conf spark.pyspark.driver.python=... a spark-submit."
+            "En Windows (solo driver), sin fijar el intérprete de los workers:\n"
+            "  $env:PYSPARK_DRIVER_PYTHON = (Resolve-Path '.\\.venv\\Scripts\\python.exe').Path\n"
+            "  Remove-Item Env:PYSPARK_PYTHON -ErrorAction SilentlyContinue\n"
+            "En cluster, `spark.pyspark.python` queda en `python` (PATH en cada worker); "
+            "opcional: $env:SPARK_EXECUTOR_PYTHON si todos los workers comparten la misma ruta."
         )
 
 
@@ -199,16 +200,9 @@ def build_spark(args: argparse.Namespace) -> SparkSession:
             b = b.config("spark.pyspark.python", driver_py)
             logger.info("spark.pyspark.python=%s (local: mismo que driver)", driver_py)
     else:
-        exec_py = (os.environ.get("SPARK_EXECUTOR_PYTHON") or "").strip()
-        if exec_py:
-            b = b.config("spark.pyspark.python", exec_py)
-            logger.info("spark.pyspark.python=%s (executors remotos)", exec_py)
-        else:
-            logger.warning(
-                "Modo cluster sin SPARK_EXECUTOR_PYTHON: los workers usarán `python3` del PATH. "
-                "Deben tener pyarrow>=4, sentence-transformers y torch instalados, "
-                "o define SPARK_EXECUTOR_PYTHON=/ruta/al/venv/bin/python3 antes de spark-submit."
-            )
+        exec_py = (os.environ.get("SPARK_EXECUTOR_PYTHON") or "python").strip()
+        b = b.config("spark.pyspark.python", exec_py)
+        logger.info("spark.pyspark.python=%s (executors: PATH por nodo)", exec_py)
 
     if args.driver_host:
         b = b.config("spark.driver.host", args.driver_host).config("spark.driver.bindAddress", "0.0.0.0")
